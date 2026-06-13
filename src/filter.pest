@@ -1,0 +1,59 @@
+WHITESPACE = _{ " " | "\t" | NEWLINE }
+
+expression = { SOI ~ or_expr ~ EOI }
+or_expr = { and_expr ~ (OR ~ and_expr)* }
+and_expr = { unary_expr ~ (AND ~ unary_expr)* }
+unary_expr = { NOT ~ unary_expr | "(" ~ or_expr ~ ")" | predicate }
+
+predicate = {
+    path ~ (
+        EXISTS
+      | MISSING
+      | operator ~ value
+    )
+}
+
+operator = {
+      CONTAINS_ALL
+    | STARTS_WITH
+    | ENDS_WITH
+    | CONTAINS
+    | OVERLAPS
+    | MATCHES
+    | IN
+    | GTE
+    | LTE
+    | NE
+    | EQ
+    | GT
+    | LT
+}
+
+OR = _{ ^"or" }
+AND = _{ ^"and" }
+NOT = { ^"not" }
+EXISTS = { ^"exists" }
+MISSING = { ^"missing" }
+CONTAINS_ALL = { ^"contains_all" }
+STARTS_WITH = { ^"starts_with" }
+ENDS_WITH = { ^"ends_with" }
+CONTAINS = { ^"contains" }
+OVERLAPS = { ^"overlaps" }
+MATCHES = { ^"matches" }
+IN = { ^"in" }
+GTE = { ">=" }
+LTE = { "<=" }
+NE = { "!=" }
+EQ = { "==" | "=" }
+GT = { ">" }
+LT = { "<" }
+
+path = @{ path_char+ }
+path_char = { !(WHITESPACE | "(" | ")" | "=" | "!" | ">" | "<") ~ ANY }
+
+value = @{ collection | double_quoted | single_quoted | bare }
+collection = { ("[" ~ collection_char* ~ "]") | ("{" ~ collection_char* ~ "}") }
+collection_char = { double_quoted | single_quoted | (!("[" | "]" | "{" | "}") ~ ANY) }
+double_quoted = { "\"" ~ ("\\\"" | !"\"" ~ ANY)* ~ "\"" }
+single_quoted = { "'" ~ ("\\'" | !"'" ~ ANY)* ~ "'" }
+bare = { (!(WHITESPACE | "(" | ")") ~ ANY)+ }
