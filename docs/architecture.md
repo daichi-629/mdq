@@ -1,50 +1,52 @@
 # Architecture
 
-`mdq` separates storage, query syntax, and retrieval execution so compatible
-query languages can be added without changing the index schema or CLI engine.
+`mdq` separates generic Markdown storage, retrieval pipelines, structured
+query languages, and script execution. Compatibility behavior never assigns
+global meaning to a vault's frontmatter names.
 
 ## Layers
 
-1. `markdown`: parses Markdown, generic YAML frontmatter, Wiki links, and
-   standard Markdown links.
-2. `db`: owns the application-neutral SQLite schema and retrieval primitives.
-3. `query`: parses metadata filters into `MetadataFilter`.
-4. `pipeline`: applies ordered stages to a `Vec<SearchHit>`.
-5. `main`: maps CLI commands to pipeline stage specifications.
+1. `markdown`: parses Markdown, arbitrary YAML frontmatter, Wiki links, and
+   Markdown links.
+2. `db`: owns the application-neutral SQLite schema and exposes page, chunk,
+   link, BM25, and embedding primitives.
+3. `pipeline`: executes ordered retrieval stages over search chunks.
+4. `core`: defines `QueryContext`, `RecordSet`, and the complete-query adapter
+   contract.
+5. `compat`: owns Tasks, Base, Dataview DQL, and DataviewJS syntax and
+   compatibility behavior.
+6. `script`: owns the replaceable JavaScript execution boundary and resource
+   limits.
+7. `main`: maps CLI commands to the two engines without implementing query
+   semantics.
 
-No frontmatter property name has built-in meaning.
+## Complete Query Languages
 
-## Query language extension
-
-Implement `query::QueryLanguage`:
+Languages whose result domain can change implement `core::QueryAdapter`:
 
 ```rust
-pub trait QueryLanguage: Send + Sync {
+pub trait QueryAdapter: Send + Sync {
     fn name(&self) -> &'static str;
-    fn parse(&self, source: &str) -> anyhow::Result<Box<dyn MetadataFilter>>;
+    fn execute(
+        &self,
+        context: &QueryContext<'_>,
+        source: &str,
+    ) -> anyhow::Result<RecordSet>;
 }
 ```
 
-Register it with `PipelineEngine::register_query_language`. A future
-Dataview-compatible parser can then be selected with:
+Register adapters with `CompatibilityEngine::register`. `RecordSet` supports
+ordered columns, structured rows, and diagnostics. This single boundary
+handles page tables, task records, grouped results, and captured DataviewJS
+render calls.
 
-```text
-filter@dataview:...
-```
+Each compatibility language owns its parser and AST under `compat/`. Shared
+expression evaluation is in `compat::expr`; language-specific commands and
+quirks do not enter the DB or native filter parser.
 
-Tasks, Base, and Dataview compatibility should each live in a separate module
-with its own grammar and adapter. Compatibility parsers must produce the
-application-neutral `MetadataFilter` interface rather than adding syntax
-branches to the native grammar.
+## Retrieval Pipeline
 
-This interface is intentionally for predicate-compatible portions of another
-language. A full query language that changes the record domain, such as a
-Tasks query returning task records, is a pipeline stage rather than a
-frontmatter filter.
-
-## Pipeline stage extension
-
-Implement `pipeline::StageExecutor`:
+Retrieval stages implement `pipeline::StageExecutor`:
 
 ```rust
 pub trait StageExecutor: Send + Sync {
@@ -58,36 +60,39 @@ pub trait StageExecutor: Send + Sync {
 }
 ```
 
-Register it with `PipelineEngine::register_stage`. Stages receive the current
-ordered candidate set and must return the next ordered candidate set. This
-contract supports filters, graph expansion, retrieval, reranking, and
-projection without coupling those operations to CLI parsing.
+Stages receive the current ordered candidate set and return the next set.
+`filter`, `bm25`, `rag`, and `bm25+rag` may be repeated in any order. This
+contract remains search-chunk-specific; task and table queries use
+`QueryAdapter` instead of forcing unrelated records into `SearchHit`.
 
-## Current stages
+## Predicate Languages
 
-- `filter[@language]:EXPRESSION`: preserves order and removes candidates.
-- `bm25:QUERY`: ranks matching candidates with FTS5 BM25.
-- `rag:QUERY`: ranks current candidates by local embedding similarity.
-- `bm25+rag:QUERY`: applies both rankers and merges them with RRF.
+Metadata-only predicate syntaxes implement `query::QueryLanguage` and compile
+to `MetadataFilter`. They can be selected by retrieval filter stages without
+changing the native grammar.
 
-The CLI aliases `search`, `query`, `semantic`, `context`, and `rag` expand to
-one-stage pipelines. `pipeline` is the canonical execution model.
+```rust
+pub trait QueryLanguage: Send + Sync {
+    fn name(&self) -> &'static str;
+    fn parse(&self, source: &str) -> anyhow::Result<Box<dyn MetadataFilter>>;
+}
+```
 
-## Compatibility implementation boundaries
+## Script Runtime
 
-Future compatibility work should follow these boundaries:
+Syntax adapters depend on `script::ScriptEngine`, not directly on QuickJS.
+The standard `QuickJsEngine` enforces memory, stack, and time limits and does
+not expose filesystem, network, Node, DOM, or Obsidian hosts. DataviewJS and
+Tasks function clauses receive serialized read-only records.
 
-- `tasks`: add a task extractor and task index tables in a dedicated module,
-  then implement a `tasks` `StageExecutor`. Do not reinterpret frontmatter
-  keys as task fields.
-- `base`: add a separate parser-generator grammar and compile its
-  predicate-compatible subset to `MetadataFilter`; implement sorting,
-  grouping, formulas, and projection as dedicated stages.
-- `dataview`: add a separate parser-generator grammar. Compile `WHERE` to a
-  filter, `SORT` to a rank/sort stage, and `TABLE`/`LIST` projection to output
-  stages.
+## Extension Rules
 
-Cross-language behavior belongs in shared record, filter, sort, and projection
-interfaces. Syntax-specific ASTs and compatibility quirks remain inside their
-adapter modules. This avoids conditionals such as `if language == dataview`
-inside the index, native filter parser, or CLI.
+- Add generic indexed facts to `db`; never add a column for one vault's
+  property name.
+- Add language syntax and compatibility quirks under one `compat/<language>`
+  module.
+- Reuse `RecordSet`, `QueryContext`, and the shared expression value model.
+- Add a new core abstraction only when multiple adapters need the behavior.
+- Keep host I/O behind an explicit trait and deny it by default.
+- Document supported syntax and limits in `src/manual.rs`, which powers
+  `mdq manual`.

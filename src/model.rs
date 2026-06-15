@@ -45,6 +45,16 @@ pub struct NoteRef {
     pub title: String,
 }
 
+#[derive(Clone, Debug, Serialize)]
+pub struct PageRecord {
+    pub path: String,
+    pub title: String,
+    pub body: String,
+    pub metadata: serde_json::Value,
+    pub mtime: i64,
+    pub size: u64,
+}
+
 #[derive(Debug, Serialize)]
 pub struct LinkRef {
     pub source: NoteRef,

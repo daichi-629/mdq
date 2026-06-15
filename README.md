@@ -14,6 +14,9 @@ frontmatter schema.
 - backlink and graph traversal across both link styles
 - compact JSON or text context retrieval for RAG pipelines
 - local multilingual semantic embeddings and hybrid RRF retrieval
+- Tasks, Obsidian Base, Dataview DQL, and restricted DataviewJS queries
+- parser-generator-based native and compatibility expression grammars
+- built-in detailed language and extension manual
 - indexes stored outside the collection in the user cache directory
 
 ## Build
@@ -40,12 +43,20 @@ mdq --vault ~/notes embed
 mdq --vault ~/notes semantic "public key encryption research"
 mdq --vault ~/notes query 'project.state = active'
 mdq --vault ~/notes query 'custom.items contains value'
+mdq --vault ~/notes query --language tasks $'not done\nsort by due'
+mdq --vault ~/notes query --language base --file views/projects.base
+mdq --vault ~/notes query --language dataview \
+  'TABLE file.name, status FROM "Projects" WHERE status = "active"'
+mdq --vault ~/notes query --language dataviewjs \
+  'dv.list(dv.pages().map(page => page.file.link))'
 mdq --vault ~/notes backlinks "Folder/Note"
 mdq --vault ~/notes links "Folder/Note"
 mdq --vault ~/notes graph "Folder/Note" --depth 2
 mdq --vault ~/notes --json context "authentication design"
 mdq --vault ~/notes --json rag "authentication design"
 mdq --vault ~/notes status
+mdq manual
+mdq manual tasks
 ```
 
 `pipeline` is the canonical execution model. Stages run in the exact order
@@ -58,8 +69,11 @@ rag:QUERY
 bm25+rag:QUERY
 ```
 
-`search`, `query`, `semantic`, `context`, and `rag` are convenience aliases for
-one-stage pipelines.
+`search`, native `query`, `semantic`, `context`, and `rag` are convenience
+aliases for one-stage pipelines. Compatibility query languages return
+structured records through a separate adapter API because their result domain
+can be pages, tasks, groups, tables, or rendered values rather than search
+chunks.
 
 ## Native filter language
 
@@ -104,8 +118,15 @@ not inside the Markdown collection. Use `--db <path>` to override it.
 
 ## Extending mdq
 
-The Rust library exposes `QueryLanguage`, `MetadataFilter`, `StageExecutor`,
-and `PipelineEngine::register_*`. Tasks, Base, and Dataview compatibility can
-therefore be implemented as separate parser adapters or stages without adding
-special cases to the native frontmatter implementation. See
+The Rust library exposes:
+
+- `QueryAdapter` and `CompatibilityEngine::register` for complete query
+  languages returning `RecordSet`
+- `ScriptEngine` for replaceable restricted script execution
+- `QueryLanguage` and `MetadataFilter` for predicate-compatible metadata
+  syntaxes
+- `StageExecutor` and `PipelineEngine::register_stage` for ordered retrieval
+  stages
+
+Run `mdq manual extensions` or see
 [`docs/architecture.md`](docs/architecture.md).

@@ -3,7 +3,10 @@ use std::path::PathBuf;
 
 use anyhow::{Context, Result, bail};
 use clap::{Parser, Subcommand};
+use mdq::compat::CompatibilityEngine;
+use mdq::core::{QueryContext, RecordSet};
 use mdq::db::{Database, default_db_path};
+use mdq::manual;
 use mdq::model::{NoteRef, SearchHit};
 use mdq::pipeline::{PipelineEngine, StageSpec};
 use mdq::semantic;
@@ -49,9 +52,17 @@ enum Command {
         #[arg(short, long, default_value_t = 10)]
         limit: usize,
     },
-    /// Query arbitrary YAML frontmatter paths.
+    /// Run a native, Tasks, Base, Dataview, or DataviewJS query.
     Query {
-        expression: String,
+        /// Inline query source. Use --file for .base files or longer scripts.
+        expression: Option<String>,
+        #[arg(long, default_value = "native")]
+        language: String,
+        #[arg(long)]
+        file: Option<PathBuf>,
+        /// Current note used by this.file and dv.current().
+        #[arg(long)]
+        current: Option<PathBuf>,
         #[arg(short, long, default_value_t = 100)]
         limit: usize,
     },
@@ -96,10 +107,23 @@ enum Command {
     },
     /// Show index metadata and counts.
     Status,
+    /// Show the detailed language, grammar, compatibility, and extension manual.
+    Manual {
+        /// Topic: overview, native, pipeline, tasks, base, dataview, dataviewjs, extensions, all.
+        topic: Option<String>,
+    },
 }
 
 fn main() -> Result<()> {
     let cli = Cli::parse();
+    if let Command::Manual { topic } = &cli.command {
+        let rendered = manual::render(topic.as_deref())?;
+        print!("{rendered}");
+        if !rendered.ends_with('\n') {
+            println!();
+        }
+        return Ok(());
+    }
     let vault = cli
         .vault
         .canonicalize()
@@ -107,6 +131,7 @@ fn main() -> Result<()> {
     let db_path = cli.db.unwrap_or(default_db_path(&vault)?);
     let mut database = Database::open(&db_path)?;
     let pipeline = PipelineEngine::standard();
+    let compatibility = CompatibilityEngine::standard();
 
     match cli.command {
         Command::Index => {
@@ -148,10 +173,43 @@ fn main() -> Result<()> {
             let hits = run_alias(&pipeline, &database, "rag", &query, limit)?;
             output_hits(&hits, cli.json)?;
         }
-        Command::Query { expression, limit } => {
-            let hits = run_alias(&pipeline, &database, "filter", &expression, usize::MAX)?;
-            let notes = unique_notes(&hits, limit);
-            output_notes(&notes, cli.json)?;
+        Command::Query {
+            expression,
+            language,
+            file,
+            current,
+            limit,
+        } => {
+            let source = match (expression, file) {
+                (Some(source), None) => source,
+                (None, Some(path)) => std::fs::read_to_string(&path)
+                    .with_context(|| format!("cannot read query file {}", path.display()))?,
+                (Some(_), Some(_)) => {
+                    bail!("provide either inline query source or --file, not both")
+                }
+                (None, None) => bail!("query source is required"),
+            };
+            if language == "native" {
+                let hits = run_alias(&pipeline, &database, "filter", &source, usize::MAX)?;
+                let notes = unique_notes(&hits, limit);
+                output_notes(&notes, cli.json)?;
+            } else {
+                let current_file = current.map(|path| {
+                    if path.is_absolute() {
+                        path
+                    } else {
+                        vault.join(path)
+                    }
+                });
+                let context = QueryContext {
+                    database: &database,
+                    vault: &vault,
+                    current_file,
+                };
+                let mut result = compatibility.execute(&language, &context, &source)?;
+                result.rows.truncate(limit);
+                output_record_set(&result, cli.json)?;
+            }
         }
         Command::Backlinks { note } => {
             let links = database.backlinks(&note)?;
@@ -252,6 +310,7 @@ fn main() -> Result<()> {
                 println!("database: {}", db_path.display());
             }
         }
+        Command::Manual { .. } => unreachable!("manual exits before database initialization"),
     }
     Ok(())
 }
@@ -280,6 +339,19 @@ fn output_notes(notes: &[NoteRef], json: bool) -> Result<()> {
     }
     for note in notes {
         println!("{}", note.path);
+    }
+    Ok(())
+}
+
+fn output_record_set(result: &RecordSet, json: bool) -> Result<()> {
+    if json {
+        return print_json(result);
+    }
+    for row in &result.rows {
+        println!("{}", serde_json::to_string(row)?);
+    }
+    for diagnostic in &result.diagnostics {
+        eprintln!("warning: {diagnostic}");
     }
     Ok(())
 }

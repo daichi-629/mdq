@@ -1,7 +1,11 @@
+pub mod compat;
+pub mod core;
 pub mod db;
+pub mod manual;
 pub mod markdown;
 pub mod model;
 pub mod pipeline;
 pub mod query;
+pub mod script;
 pub mod semantic;
 pub mod tokenize;

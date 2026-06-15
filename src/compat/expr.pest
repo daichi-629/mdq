@@ -1,0 +1,27 @@
+WHITESPACE = _{ " " | "\t" | "\r" | "\n" }
+expression = { SOI ~ or_expr ~ EOI }
+or_expr = { and_expr ~ (OR ~ and_expr)* }
+and_expr = { unary_expr ~ (AND ~ unary_expr)* }
+unary_expr = { NOT* ~ comparison }
+comparison = { sum ~ (operator ~ sum)? }
+sum = { postfix ~ (add_operator ~ postfix)* }
+add_operator = { "+" | "-" }
+postfix = { primary ~ method_call* }
+primary = { function_call | list | string | date_literal | number | boolean | null | identifier | "(" ~ or_expr ~ ")" }
+function_call = { identifier ~ "(" ~ arguments? ~ ")" }
+method_call = { "." ~ identifier ~ "(" ~ arguments? ~ ")" }
+arguments = { or_expr ~ ("," ~ or_expr)* }
+list = { "[" ~ (or_expr ~ ("," ~ or_expr)*)? ~ "]" }
+operator = { ">=" | "<=" | "!=" | "==" | "=" | ">" | "<" }
+OR = _{ ^"or" | "||" }
+AND = _{ ^"and" | "&&" }
+NOT = { ^"not" | "!" }
+boolean = { ^"true" | ^"false" }
+null = { ^"null" }
+number = @{ "-"? ~ ASCII_DIGIT+ ~ ("." ~ ASCII_DIGIT+)? }
+date_literal = @{ ASCII_DIGIT{4} ~ "-" ~ ASCII_DIGIT{2} ~ "-" ~ ASCII_DIGIT{2} }
+string = @{ single_string | double_string }
+single_string = { "'" ~ ("\\'" | !"'" ~ ANY)* ~ "'" }
+double_string = { "\"" ~ ("\\\"" | !"\"" ~ ANY)* ~ "\"" }
+identifier = @{ (ASCII_ALPHANUMERIC | "_" | "-" | "#" | "/" | NON_ASCII)+ ~ ("." ~ (ASCII_ALPHANUMERIC | "_" | "-" | "#" | "/" | NON_ASCII)+)* }
+NON_ASCII = _{ '\u{80}'..'\u{10ffff}' }

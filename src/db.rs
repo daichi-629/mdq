@@ -7,7 +7,7 @@ use sha2::{Digest, Sha256};
 use walkdir::{DirEntry, WalkDir};
 
 use crate::markdown::{normalize_target, parse_note};
-use crate::model::{EmbeddingInput, LinkRef, NoteRef, SearchHit};
+use crate::model::{EmbeddingInput, LinkRef, NoteRef, PageRecord, SearchHit};
 use crate::query::MetadataFilter;
 use crate::tokenize::{fts_query, index_text};
 
@@ -373,6 +373,33 @@ impl Database {
                 heading: row.get(3)?,
                 score: 0.0,
                 snippet: source_snippet(&body, "", 180),
+            })
+        })?;
+        rows.collect::<rusqlite::Result<Vec<_>>>()
+            .map_err(Into::into)
+    }
+
+    /// Returns format-neutral page records for compatibility query adapters.
+    pub fn all_pages(&self) -> Result<Vec<PageRecord>> {
+        let mut statement = self.connection.prepare(
+            "
+            SELECT path, title, body, frontmatter_json, mtime, size
+            FROM notes
+            ORDER BY path
+            ",
+        )?;
+        let rows = statement.query_map([], |row| {
+            let metadata = row
+                .get::<_, Option<String>>(3)?
+                .and_then(|json| serde_json::from_str(&json).ok())
+                .unwrap_or_else(|| serde_json::Value::Object(Default::default()));
+            Ok(PageRecord {
+                path: row.get(0)?,
+                title: row.get(1)?,
+                body: row.get(2)?,
+                metadata,
+                mtime: row.get(4)?,
+                size: row.get::<_, i64>(5)? as u64,
             })
         })?;
         rows.collect::<rusqlite::Result<Vec<_>>>()
