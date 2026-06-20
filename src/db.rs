@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
@@ -487,7 +487,7 @@ impl Database {
             .map_err(Into::into)
     }
 
-    pub fn status(&self) -> Result<Status> {
+    pub fn status(&self, embedding_model: &str) -> Result<Status> {
         let count = |table: &str| -> Result<usize> {
             Ok(self
                 .connection
@@ -495,8 +495,13 @@ impl Database {
                     row.get::<_, i64>(0)
                 })? as usize)
         };
+        let vault = self.metadata("vault")?;
+        let index_stale = match &vault {
+            Some(path) => self.is_stale(Path::new(path))?,
+            None => true,
+        };
         Ok(Status {
-            vault: self.metadata("vault")?,
+            vault,
             indexed_at: self.metadata("indexed_at")?,
             notes: count("notes")?,
             chunks: count("chunks")?,
@@ -518,7 +523,108 @@ impl Database {
                 |row| row.get::<_, i64>(0),
             )? as usize,
             cached_embeddings: count("embeddings")?,
+            index_stale,
+            embeddings_stale: self.embeddings_stale(embedding_model)?,
         })
+    }
+
+    /// True when the vault's Markdown files have changed since the last `rebuild`.
+    pub fn is_stale(&self, vault: &Path) -> Result<bool> {
+        Ok(self.staleness(vault)? > 0)
+    }
+
+    /// Number of Markdown files added, removed, or modified since the last `rebuild`.
+    pub fn staleness(&self, vault: &Path) -> Result<usize> {
+        let mut current = HashMap::<String, (i64, u64)>::new();
+        for entry in WalkDir::new(vault)
+            .follow_links(false)
+            .into_iter()
+            .filter_entry(visible_entry)
+            .filter_map(Result::ok)
+            .filter(|entry| entry.file_type().is_file())
+            .filter(|entry| {
+                entry
+                    .path()
+                    .extension()
+                    .is_some_and(|extension| extension.eq_ignore_ascii_case("md"))
+            })
+        {
+            let metadata = entry.metadata()?;
+            let mtime = metadata
+                .modified()
+                .ok()
+                .and_then(|time| time.duration_since(std::time::UNIX_EPOCH).ok())
+                .map(|duration| duration.as_secs() as i64)
+                .unwrap_or_default();
+            let relative = entry
+                .path()
+                .strip_prefix(vault)
+                .unwrap_or(entry.path())
+                .to_string_lossy()
+                .replace('\\', "/");
+            current.insert(relative, (mtime, metadata.len()));
+        }
+
+        let mut statement = self
+            .connection
+            .prepare("SELECT path, mtime, size FROM notes")?;
+        let mut indexed = HashMap::<String, (i64, u64)>::new();
+        let rows = statement.query_map([], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, i64>(1)?,
+                row.get::<_, i64>(2)? as u64,
+            ))
+        })?;
+        for row in rows {
+            let (path, mtime, size) = row?;
+            indexed.insert(path, (mtime, size));
+        }
+
+        let mut changed = 0;
+        let all_paths: HashSet<&String> = current.keys().chain(indexed.keys()).collect();
+        for path in all_paths {
+            if current.get(path) != indexed.get(path) {
+                changed += 1;
+            }
+        }
+        Ok(changed)
+    }
+
+    /// True when chunks exist that have not yet been embedded with `model`.
+    pub fn embeddings_stale(&self, model: &str) -> Result<bool> {
+        Ok(self.missing_embeddings_count(model)? > 0)
+    }
+
+    /// Number of chunks that have not yet been embedded with `model`.
+    pub fn missing_embeddings_count(&self, model: &str) -> Result<usize> {
+        let missing: i64 = self.connection.query_row(
+            "
+            SELECT count(*)
+            FROM chunks c
+            LEFT JOIN embeddings e
+              ON e.content_hash = c.content_hash AND e.model = ?1
+            WHERE e.content_hash IS NULL
+            ",
+            [model],
+            |row| row.get(0),
+        )?;
+        Ok(missing as usize)
+    }
+
+    /// True when this vault has a previously built index (as opposed to never indexed).
+    pub fn has_index(&self) -> Result<bool> {
+        Ok(self.metadata("vault")?.is_some())
+    }
+
+    /// True when at least one embedding has been cached for this vault.
+    pub fn has_embeddings(&self) -> Result<bool> {
+        Ok(self
+            .connection
+            .query_row("SELECT count(*) FROM embeddings", [], |row| {
+                row.get::<_, i64>(0)
+            })?
+            > 0)
     }
 
     fn metadata(&self, key: &str) -> Result<Option<String>> {
@@ -732,6 +838,8 @@ pub struct Status {
     pub unresolved_links: usize,
     pub embeddings: usize,
     pub cached_embeddings: usize,
+    pub index_stale: bool,
+    pub embeddings_stale: bool,
 }
 
 #[cfg(test)]

@@ -233,8 +233,8 @@ fn reciprocal_rank_fusion<const N: usize>(rankings: [Vec<SearchHit>; N]) -> Vec<
 }
 
 fn require_embeddings(database: &Database) -> Result<()> {
-    if database.status()?.embeddings == 0 {
-        bail!("no embeddings found; run `mdq --vault <path> embed` first");
+    if database.embeddings_stale(semantic::MODEL_ID)? {
+        bail!("embeddings are missing or stale; run `mdq --vault <path> index` first");
     }
     Ok(())
 }

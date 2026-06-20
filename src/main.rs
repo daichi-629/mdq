@@ -1,8 +1,8 @@
 use std::collections::{HashMap, HashSet, VecDeque};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, bail};
-use clap::{Parser, Subcommand};
+use clap::{Parser, Subcommand, ValueEnum};
 use mdq::compat::CompatibilityEngine;
 use mdq::core::{QueryContext, RecordSet};
 use mdq::db::{Database, default_db_path};
@@ -27,30 +27,54 @@ struct Cli {
     #[arg(long, global = true)]
     json: bool,
 
+    /// Maximum number of changed files/chunks to refresh automatically before
+    /// running a search command. Larger drift requires an explicit `index` run.
+    #[arg(long, global = true, default_value_t = 20)]
+    auto_threshold: usize,
+
     #[command(subcommand)]
     command: Command,
 }
 
+#[derive(Clone, Copy, PartialEq, Eq, ValueEnum)]
+enum BuildTarget {
+    /// BM25 full-text index only.
+    Bm25,
+    /// Local semantic embeddings only.
+    Embed,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq, ValueEnum)]
+enum SearchEngine {
+    /// BM25 full-text retrieval only.
+    Bm25,
+    /// Semantic embedding retrieval only.
+    Rag,
+}
+
 #[derive(Subcommand)]
 enum Command {
-    /// Build a fresh local index.
-    Index,
-    /// Search indexed Markdown chunks with BM25.
-    Search {
-        query: String,
-        #[arg(short, long, default_value_t = 10)]
-        limit: usize,
-    },
-    /// Generate and cache local multilingual embeddings.
-    Embed {
+    /// Build the BM25 index and local semantic embeddings.
+    Index {
+        /// Build only this target instead of both.
+        #[arg(long, value_enum)]
+        only: Option<BuildTarget>,
         #[arg(long, default_value_t = 64)]
         batch_size: usize,
     },
-    /// Search by semantic similarity using local embeddings.
-    Semantic {
+    /// Retrieve source context for a query (default: hybrid BM25 + semantic).
+    Search {
         query: String,
-        #[arg(short, long, default_value_t = 10)]
+        #[arg(short, long, default_value_t = 8)]
         limit: usize,
+        #[arg(long, default_value_t = 2000)]
+        max_chars: usize,
+        /// Use only one retrieval engine instead of the hybrid default.
+        #[arg(long, value_enum)]
+        only: Option<SearchEngine>,
+        /// Include score and heading detail in the output.
+        #[arg(short, long)]
+        verbose: bool,
     },
     /// Run a native, Tasks, Base, Dataview, or DataviewJS query.
     Query {
@@ -76,22 +100,6 @@ enum Command {
         #[arg(long, default_value_t = 2)]
         depth: usize,
     },
-    /// Retrieve compact source context for an LLM or RAG pipeline.
-    Context {
-        query: String,
-        #[arg(short, long, default_value_t = 8)]
-        limit: usize,
-        #[arg(long, default_value_t = 12000)]
-        max_chars: usize,
-    },
-    /// Retrieve hybrid BM25 + semantic context for a RAG pipeline.
-    Rag {
-        query: String,
-        #[arg(short, long, default_value_t = 8)]
-        limit: usize,
-        #[arg(long, default_value_t = 12000)]
-        max_chars: usize,
-    },
     /// Run filters and rankers in the exact order supplied.
     Pipeline {
         /// Stage syntax: filter[@language]:EXPR, bm25:QUERY, rag:QUERY, bm25+rag:QUERY
@@ -104,12 +112,18 @@ enum Command {
         context: bool,
         #[arg(long, default_value_t = 12000)]
         max_chars: usize,
+        /// Include score and heading detail in the output.
+        #[arg(short, long)]
+        verbose: bool,
     },
     /// Show index metadata and counts.
     Status,
-    /// Show the detailed language, grammar, compatibility, and extension manual.
+    /// Show the per-command manual, query language reference, and examples.
+    #[command(alias = "man")]
     Manual {
-        /// Topic: overview, native, pipeline, tasks, base, dataview, dataviewjs, extensions, all.
+        /// Topic: overview, index, search, query, backlinks, links, graph,
+        /// pipeline, status, native, tasks, base, dataview, dataviewjs,
+        /// extensions, examples, all.
         topic: Option<String>,
     },
 }
@@ -133,45 +147,63 @@ fn main() -> Result<()> {
     let pipeline = PipelineEngine::standard();
     let compatibility = CompatibilityEngine::standard();
 
+    let needs_fresh_index = !matches!(
+        cli.command,
+        Command::Index { .. } | Command::Status | Command::Manual { .. }
+    );
+    if needs_fresh_index {
+        ensure_index_fresh(&mut database, &vault, cli.auto_threshold)?;
+    }
+
     match cli.command {
-        Command::Index => {
-            let stats = database.rebuild(&vault)?;
+        Command::Index { only, batch_size } => {
+            let build_bm25 = only != Some(BuildTarget::Embed);
+            let build_embed = only != Some(BuildTarget::Bm25);
+            let stats = build_bm25.then(|| database.rebuild(&vault)).transpose()?;
+            let embedded = build_embed
+                .then(|| semantic::embed_missing(&mut database, batch_size))
+                .transpose()?;
             if cli.json {
                 print_json(&serde_json::json!({
                     "vault": vault,
                     "database": db_path,
-                    "notes": stats.notes,
-                    "chunks": stats.chunks,
-                    "links": stats.links,
+                    "notes": stats.as_ref().map(|stats| stats.notes),
+                    "chunks": stats.as_ref().map(|stats| stats.chunks),
+                    "links": stats.as_ref().map(|stats| stats.links),
+                    "embedded": embedded,
+                    "model": build_embed.then_some(semantic::MODEL_ID),
                 }))?;
             } else {
-                println!(
-                    "indexed {} notes, {} chunks, {} links\n{}",
-                    stats.notes,
-                    stats.chunks,
-                    stats.links,
-                    db_path.display()
-                );
+                if let Some(stats) = &stats {
+                    println!(
+                        "indexed {} notes, {} chunks, {} links",
+                        stats.notes, stats.chunks, stats.links
+                    );
+                }
+                if let Some(embedded) = embedded {
+                    println!("embedded {embedded} chunks with {}", semantic::MODEL_ID);
+                }
+                println!("{}", db_path.display());
             }
         }
-        Command::Search { query, limit } => {
-            let hits = run_alias(&pipeline, &database, "bm25", &query, limit)?;
-            output_hits(&hits, cli.json)?;
-        }
-        Command::Embed { batch_size } => {
-            let count = semantic::embed_missing(&mut database, batch_size)?;
-            if cli.json {
-                print_json(&serde_json::json!({
-                    "model": semantic::MODEL_ID,
-                    "embedded": count,
-                }))?;
-            } else {
-                println!("embedded {count} chunks with {}", semantic::MODEL_ID);
+        Command::Search {
+            query,
+            limit,
+            max_chars,
+            only,
+            verbose,
+        } => {
+            if only != Some(SearchEngine::Bm25) {
+                ensure_embeddings_fresh(&mut database, &vault, cli.auto_threshold)?;
             }
-        }
-        Command::Semantic { query, limit } => {
-            let hits = run_alias(&pipeline, &database, "rag", &query, limit)?;
-            output_hits(&hits, cli.json)?;
+            let (stage, fetch_limit) = match only {
+                Some(SearchEngine::Bm25) => ("bm25", limit.saturating_mul(3).max(limit)),
+                Some(SearchEngine::Rag) => ("rag", limit.saturating_mul(3).max(limit)),
+                None => ("bm25+rag", limit.saturating_mul(5).max(30)),
+            };
+            let hits = run_alias(&pipeline, &database, stage, &query, fetch_limit)?;
+            let context = build_context(&database, hits, limit, max_chars)?;
+            output_context(context, cli.json, verbose)?;
         }
         Command::Query {
             expression,
@@ -239,57 +271,34 @@ fn main() -> Result<()> {
             let graph = traverse_graph(&database, &note, depth)?;
             output_notes(&graph, cli.json)?;
         }
-        Command::Context {
-            query,
-            limit,
-            max_chars,
-        } => {
-            let hits = run_alias(
-                &pipeline,
-                &database,
-                "bm25",
-                &query,
-                limit.saturating_mul(3).max(limit),
-            )?;
-            let context = build_context(&database, hits, limit, max_chars)?;
-            output_context(context, cli.json)?;
-        }
-        Command::Rag {
-            query,
-            limit,
-            max_chars,
-        } => {
-            let hits = run_alias(
-                &pipeline,
-                &database,
-                "bm25+rag",
-                &query,
-                limit.saturating_mul(5).max(30),
-            )?;
-            let context = build_context(&database, hits, limit, max_chars)?;
-            output_context(context, cli.json)?;
-        }
         Command::Pipeline {
             stages,
             limit,
             context,
             max_chars,
+            verbose,
         } => {
             let stages = stages
                 .iter()
                 .map(|stage| StageSpec::parse(stage))
                 .collect::<Result<Vec<_>>>()?;
+            if stages
+                .iter()
+                .any(|stage| stage.name == "rag" || stage.name == "bm25+rag")
+            {
+                ensure_embeddings_fresh(&mut database, &vault, cli.auto_threshold)?;
+            }
             let mut hits = pipeline.execute(&database, &stages)?;
             if context {
                 let context = build_context(&database, hits, limit, max_chars)?;
-                output_context(context, cli.json)?;
+                output_context(context, cli.json, verbose)?;
             } else {
                 hits.truncate(limit);
-                output_hits(&hits, cli.json)?;
+                output_hits(&hits, cli.json, verbose)?;
             }
         }
         Command::Status => {
-            let status = database.status()?;
+            let status = database.status(semantic::MODEL_ID)?;
             if cli.json {
                 print_json(&status)?;
             } else {
@@ -307,6 +316,8 @@ fn main() -> Result<()> {
                 println!("unresolved_links: {}", status.unresolved_links);
                 println!("embeddings: {}", status.embeddings);
                 println!("cached_embeddings: {}", status.cached_embeddings);
+                println!("index_stale: {}", status.index_stale);
+                println!("embeddings_stale: {}", status.embeddings_stale);
                 println!("database: {}", db_path.display());
             }
         }
@@ -315,7 +326,46 @@ fn main() -> Result<()> {
     Ok(())
 }
 
-fn output_hits(hits: &[SearchHit], json: bool) -> Result<()> {
+/// Refreshes the BM25 index when the vault has drifted from it. A small drift on an
+/// already-indexed vault is refreshed automatically; a large or first-time drift requires
+/// an explicit `index` run, since that may mean the wrong vault or an unbuilt index.
+fn ensure_index_fresh(database: &mut Database, vault: &Path, threshold: usize) -> Result<()> {
+    let changed = database.staleness(vault)?;
+    if changed == 0 {
+        return Ok(());
+    }
+    if database.has_index()? && changed <= threshold {
+        eprintln!("vault changed ({changed} file(s)); refreshing index automatically");
+        database.rebuild(vault)?;
+        Ok(())
+    } else {
+        bail!(
+            "index is stale ({changed} changed file(s)); run `mdq --vault {} index` to refresh",
+            vault.display()
+        )
+    }
+}
+
+/// Refreshes embeddings when chunks are missing them, under the same threshold policy as
+/// `ensure_index_fresh`.
+fn ensure_embeddings_fresh(database: &mut Database, vault: &Path, threshold: usize) -> Result<()> {
+    let missing = database.missing_embeddings_count(semantic::MODEL_ID)?;
+    if missing == 0 {
+        return Ok(());
+    }
+    if database.has_embeddings()? && missing <= threshold {
+        eprintln!("{missing} chunk(s) missing embeddings; embedding automatically");
+        semantic::embed_missing(database, 64)?;
+        Ok(())
+    } else {
+        bail!(
+            "embeddings are missing or stale ({missing} chunk(s)); run `mdq --vault {} index` to refresh",
+            vault.display()
+        )
+    }
+}
+
+fn output_hits(hits: &[SearchHit], json: bool, verbose: bool) -> Result<()> {
     if json {
         return print_json(hits);
     }
@@ -325,10 +375,12 @@ fn output_hits(hits: &[SearchHit], json: bool) -> Result<()> {
             .as_deref()
             .map(|heading| format!("#{heading}"))
             .unwrap_or_default();
-        println!(
-            "{:.6}\t{}{}\n  {}",
-            hit.score, hit.path, heading, hit.snippet
-        );
+        if verbose {
+            println!("{}{} (score={:.6})", hit.path, heading, hit.score);
+        } else {
+            println!("{}{}", hit.path, heading);
+        }
+        println!("{}", hit.snippet);
     }
     Ok(())
 }
@@ -462,16 +514,25 @@ fn run_alias(
     Ok(hits)
 }
 
-fn output_context(context: Vec<ContextItem>, json: bool) -> Result<()> {
+fn output_context(context: Vec<ContextItem>, json: bool, verbose: bool) -> Result<()> {
     if json {
         return print_json(&context);
     }
-    for item in context {
-        println!("---\nsource: {}", item.path);
-        if let Some(heading) = item.heading {
-            println!("heading: {heading}");
+    for (index, item) in context.iter().enumerate() {
+        if index > 0 {
+            println!();
         }
-        println!("score: {:.6}\n\n{}", item.score, item.text);
+        let heading = item
+            .heading
+            .as_deref()
+            .map(|heading| format!("#{heading}"))
+            .unwrap_or_default();
+        if verbose {
+            println!("{}{} (score={:.6})", item.path, heading, item.score);
+        } else {
+            println!("{}{}", item.path, heading);
+        }
+        println!("{}", item.text);
     }
     Ok(())
 }
