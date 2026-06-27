@@ -72,7 +72,11 @@ impl ScriptEngine for QuickJsEngine {
             let result: rquickjs::Value<'_> = ctx
                 .eval(wrapped)
                 .catch(&ctx)
-                .map_err(|error| anyhow::anyhow!("{error}"))?;
+                .map_err(|error| {
+                    let msg = error.to_string();
+                    let first_line = msg.lines().next().unwrap_or(&msg).to_owned();
+                    anyhow::anyhow!("{first_line}")
+                })?;
             rquickjs_serde::from_value(result).context("JavaScript result is not serializable")
         })?;
         if interrupted.load(Ordering::Relaxed) {

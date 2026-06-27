@@ -142,6 +142,9 @@ fn main() -> Result<()> {
         .vault
         .canonicalize()
         .with_context(|| format!("vault does not exist: {}", cli.vault.display()))?;
+    if !vault.is_dir() {
+        bail!("vault must be a directory: {}", vault.display());
+    }
     let db_path = cli.db.unwrap_or(default_db_path(&vault)?);
     let mut database = Database::open(&db_path)?;
     let pipeline = PipelineEngine::standard();
@@ -193,6 +196,9 @@ fn main() -> Result<()> {
             only,
             verbose,
         } => {
+            if query.trim().is_empty() {
+                bail!("search query cannot be empty");
+            }
             if only != Some(SearchEngine::Bm25) {
                 ensure_embeddings_fresh(&mut database, &vault, cli.auto_threshold)?;
             }
@@ -212,6 +218,7 @@ fn main() -> Result<()> {
             current,
             limit,
         } => {
+            let language = language.to_ascii_lowercase();
             let source = match (expression, file) {
                 (Some(source), None) => source,
                 (None, Some(path)) => std::fs::read_to_string(&path)
@@ -225,8 +232,9 @@ fn main() -> Result<()> {
                 if source.trim().is_empty() {
                     bail!("query expression cannot be empty");
                 }
-                let hits = run_alias(&pipeline, &database, "filter", &source, usize::MAX)?;
-                let notes = unique_notes(&hits, limit);
+                let expression = mdq::query::Expression::parse(&source)?;
+                let mut notes = database.query_frontmatter(&expression)?;
+                notes.truncate(limit);
                 output_notes(&notes, cli.json)?;
             } else {
                 let current_file = current.map(|path| {
@@ -247,6 +255,9 @@ fn main() -> Result<()> {
             }
         }
         Command::Backlinks { note } => {
+            if database.note_body(&note)?.is_none() {
+                bail!("note not found or ambiguous: {note}");
+            }
             let links = database.backlinks(&note)?;
             if cli.json {
                 print_json(&links)?;
@@ -257,6 +268,9 @@ fn main() -> Result<()> {
             }
         }
         Command::Links { note } => {
+            if database.note_body(&note)?.is_none() {
+                bail!("note not found or ambiguous: {note}");
+            }
             let links = database.outgoing_links(&note)?;
             if cli.json {
                 print_json(&links)?;
@@ -409,18 +423,6 @@ fn output_record_set(result: &RecordSet, json: bool) -> Result<()> {
         eprintln!("warning: {diagnostic}");
     }
     Ok(())
-}
-
-fn unique_notes(hits: &[SearchHit], limit: usize) -> Vec<NoteRef> {
-    let mut seen = HashSet::new();
-    hits.iter()
-        .filter(|hit| seen.insert(hit.path.clone()))
-        .take(limit)
-        .map(|hit| NoteRef {
-            path: hit.path.clone(),
-            title: hit.title.clone(),
-        })
-        .collect()
 }
 
 fn traverse_graph(database: &Database, start: &str, depth: usize) -> Result<Vec<NoteRef>> {

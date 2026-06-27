@@ -922,4 +922,43 @@ mod tests {
         assert_eq!(hits.len(), 1);
         assert_eq!(hits[0].path, "nested/beta.md");
     }
+
+    #[test]
+    fn query_frontmatter_finds_frontmatter_only_notes() {
+        let directory = tempfile::tempdir().unwrap();
+        let vault = directory.path().join("notes");
+        fs::create_dir_all(&vault).unwrap();
+        fs::write(
+            vault.join("meta_only.md"),
+            "---\nkind: reference\n---\n",
+        )
+        .unwrap();
+        fs::write(
+            vault.join("with_body.md"),
+            "---\nkind: reference\n---\n# Body\nsome content\n",
+        )
+        .unwrap();
+        let mut database = Database::open(&directory.path().join("index.sqlite3")).unwrap();
+        database.rebuild(&vault).unwrap();
+
+        let expression = Expression::parse("kind = reference").unwrap();
+        let notes = database.query_frontmatter(&expression).unwrap();
+        assert_eq!(notes.len(), 2, "frontmatter-only note must be returned by query_frontmatter");
+        let paths: Vec<&str> = notes.iter().map(|n| n.path.as_str()).collect();
+        assert!(paths.contains(&"meta_only.md"));
+        assert!(paths.contains(&"with_body.md"));
+    }
+
+    #[test]
+    fn backlinks_returns_none_for_missing_note() {
+        let directory = tempfile::tempdir().unwrap();
+        let vault = directory.path().join("notes");
+        fs::create_dir_all(&vault).unwrap();
+        fs::write(vault.join("a.md"), "# A\n").unwrap();
+        let mut database = Database::open(&directory.path().join("index.sqlite3")).unwrap();
+        database.rebuild(&vault).unwrap();
+
+        let result = database.note_body("nonexistent").unwrap();
+        assert!(result.is_none(), "note_body must return None for missing note");
+    }
 }

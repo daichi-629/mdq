@@ -19,6 +19,9 @@ impl QueryAdapter for BaseAdapter {
     fn execute(&self, context: &QueryContext<'_>, source: &str) -> Result<RecordSet> {
         let yaml: serde_yaml::Value =
             serde_yaml::from_str(source).context("invalid Obsidian Base YAML")?;
+        if !matches!(yaml, serde_yaml::Value::Mapping(_) | serde_yaml::Value::Null) {
+            anyhow::bail!("invalid Obsidian Base YAML: expected a mapping document, got a scalar");
+        }
         let document = serde_json::to_value(yaml)?;
         let global_filter = document.get("filters");
         let view = document
@@ -497,5 +500,20 @@ mod tests {
             (stddev - 2.0).abs() < 1e-10,
             "expected stddev ~2.0, got {stddev}"
         );
+    }
+
+    #[test]
+    fn scalar_base_yaml_is_rejected() {
+        use crate::core::QueryContext;
+        use crate::db::Database;
+        use std::path::PathBuf;
+        let dir = tempfile::tempdir().unwrap();
+        let db = Database::open(&dir.path().join("i.sqlite3")).unwrap();
+        let vault = PathBuf::from("/tmp");
+        let context = QueryContext { database: &db, vault: &vault, current_file: None };
+        let result = BaseAdapter.execute(&context, "INVALID QUERY SYNTAX");
+        assert!(result.is_err(), "scalar YAML must be rejected");
+        let msg = result.unwrap_err().to_string();
+        assert!(msg.contains("mapping"), "error must mention expected type: {msg}");
     }
 }
