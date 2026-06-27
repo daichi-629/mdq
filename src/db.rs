@@ -37,6 +37,7 @@ impl Database {
                 body TEXT NOT NULL,
                 frontmatter_json TEXT,
                 mtime INTEGER NOT NULL,
+                ctime INTEGER NOT NULL DEFAULT 0,
                 size INTEGER NOT NULL,
                 content_hash TEXT NOT NULL
             );
@@ -87,6 +88,7 @@ impl Database {
             "content_hash",
             "TEXT NOT NULL DEFAULT ''",
         )?;
+        ensure_column(&connection, "notes", "ctime", "INTEGER NOT NULL DEFAULT 0")?;
         Ok(Self { connection })
     }
 
@@ -121,14 +123,15 @@ impl Database {
         for file in &files {
             let note = parse_note(vault, file)?;
             transaction.execute(
-                "INSERT INTO notes(path, title, body, frontmatter_json, mtime, size, content_hash)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+                "INSERT INTO notes(path, title, body, frontmatter_json, mtime, ctime, size, content_hash)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
                 params![
                     note.path,
                     note.title,
                     note.body,
                     note.frontmatter.as_ref().map(serde_json::Value::to_string),
                     note.mtime,
+                    note.ctime,
                     note.size as i64,
                     note.hash,
                 ],
@@ -383,7 +386,7 @@ impl Database {
     pub fn all_pages(&self) -> Result<Vec<PageRecord>> {
         let mut statement = self.connection.prepare(
             "
-            SELECT path, title, body, frontmatter_json, mtime, size
+            SELECT path, title, body, frontmatter_json, mtime, ctime, size
             FROM notes
             ORDER BY path
             ",
@@ -399,7 +402,8 @@ impl Database {
                 body: row.get(2)?,
                 metadata,
                 mtime: row.get(4)?,
-                size: row.get::<_, i64>(5)? as u64,
+                ctime: row.get(5)?,
+                size: row.get::<_, i64>(6)? as u64,
             })
         })?;
         rows.collect::<rusqlite::Result<Vec<_>>>()
@@ -422,6 +426,38 @@ impl Database {
             ",
             target_id,
         )
+    }
+
+    /// Every link in the vault, for bulk construction of compatibility
+    /// `file.links` / `file.backlinks` / `file.embeds` fields without N+1 queries.
+    pub fn all_links(&self) -> Result<Vec<LinkRef>> {
+        let mut statement = self.connection.prepare(
+            "
+            SELECT s.path, s.title, t.path, t.title, l.raw_target, l.heading, l.is_embed
+            FROM links l
+            JOIN notes s ON s.id = l.source_note_id
+            LEFT JOIN notes t ON t.id = l.target_note_id
+            ORDER BY s.path, l.id
+            ",
+        )?;
+        let rows = statement.query_map([], |row| {
+            let target_path: Option<String> = row.get(2)?;
+            let target_title: Option<String> = row.get(3)?;
+            Ok(LinkRef {
+                source: NoteRef {
+                    path: row.get(0)?,
+                    title: row.get(1)?,
+                },
+                target: target_path
+                    .zip(target_title)
+                    .map(|(path, title)| NoteRef { path, title }),
+                raw_target: row.get(4)?,
+                heading: row.get(5)?,
+                embed: row.get(6)?,
+            })
+        })?;
+        rows.collect::<rusqlite::Result<Vec<_>>>()
+            .map_err(Into::into)
     }
 
     pub fn outgoing_links(&self, source: &str) -> Result<Vec<LinkRef>> {

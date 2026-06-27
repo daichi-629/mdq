@@ -21,6 +21,12 @@ pub fn parse_note(vault: &Path, path: &Path) -> Result<ParsedNote> {
         .and_then(|time| time.duration_since(UNIX_EPOCH).ok())
         .map(|duration| duration.as_secs() as i64)
         .unwrap_or_default();
+    let ctime = metadata
+        .created()
+        .ok()
+        .and_then(|time| time.duration_since(UNIX_EPOCH).ok())
+        .map(|duration| duration.as_secs() as i64)
+        .unwrap_or(mtime);
     let hash = hex::encode(Sha256::digest(&bytes));
     let relative = path
         .strip_prefix(vault)
@@ -33,15 +39,20 @@ pub fn parse_note(vault: &Path, path: &Path) -> Result<ParsedNote> {
         .unwrap_or_default()
         .to_owned();
     let (frontmatter, body) = split_frontmatter(&text);
+    let link_source = frontmatter
+        .as_ref()
+        .map(|value| format!("{body}\n{}", value))
+        .unwrap_or_else(|| body.to_owned());
 
     Ok(ParsedNote {
         path: relative,
         title,
         frontmatter,
         chunks: split_chunks(body),
-        links: extract_links(body),
+        links: extract_links(&link_source),
         body: body.to_owned(),
         mtime,
+        ctime,
         size: metadata.len(),
         hash,
     })
@@ -174,6 +185,20 @@ fn extract_links(body: &str) -> Vec<ParsedLink> {
     links
 }
 
+pub fn extract_tags(body: &str) -> Vec<String> {
+    let tag_re = Regex::new(r"(?:^|[^A-Za-z0-9_])#([A-Za-z0-9_/-]+)").unwrap();
+    let mut tags: Vec<String> = tag_re
+        .captures_iter(body)
+        .filter_map(|captures| {
+            let tag = captures.get(1)?.as_str().trim_matches('/').to_owned();
+            if tag.is_empty() { None } else { Some(tag) }
+        })
+        .collect();
+    let mut seen = HashSet::new();
+    tags.retain(|tag| seen.insert(tag.clone()));
+    tags
+}
+
 pub fn normalize_target(target: &str) -> String {
     let mut path = PathBuf::from(target.trim());
     if path.extension().is_some_and(|extension| extension == "md") {
@@ -228,5 +253,11 @@ mod tests {
         assert_eq!(links[0].target, "../folder/a note");
         assert_eq!(links[0].heading.as_deref(), Some("Part"));
         assert!(links[1].is_embed);
+    }
+
+    #[test]
+    fn extracts_inline_tags_without_headings() {
+        let tags = extract_tags("# Heading\nText #project/alpha and #work.");
+        assert_eq!(tags, vec!["project/alpha", "work"]);
     }
 }

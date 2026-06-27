@@ -7,6 +7,7 @@ pub struct ParsedNote {
     pub body: String,
     pub frontmatter: Option<serde_json::Value>,
     pub mtime: i64,
+    pub ctime: i64,
     pub size: u64,
     pub hash: String,
     pub chunks: Vec<ParsedChunk>,
@@ -52,6 +53,7 @@ pub struct PageRecord {
     pub body: String,
     pub metadata: serde_json::Value,
     pub mtime: i64,
+    pub ctime: i64,
     pub size: u64,
 }
 

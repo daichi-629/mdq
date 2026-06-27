@@ -1,12 +1,13 @@
+use std::cmp::Ordering;
 use std::collections::BTreeMap;
 
 use anyhow::{Context, Result};
-use serde_json::{Map, Value};
+use serde_json::{Map, Value, json};
 
 use crate::core::{QueryAdapter, QueryContext, RecordSet, Row};
 
-use super::expr::{Expr, value_order};
-use super::page_value;
+use super::expr::{Expr, as_datetime, value_order};
+use super::{LinkIndex, page_value};
 
 pub struct BaseAdapter;
 
@@ -35,6 +36,11 @@ impl QueryAdapter for BaseAdapter {
             .and_then(Value::as_array)
             .cloned()
             .unwrap_or_default();
+        let custom_summaries = document
+            .get("summaries")
+            .and_then(Value::as_object)
+            .cloned()
+            .unwrap_or_default();
 
         let mut values = Vec::new();
         let this_file = context
@@ -42,30 +48,26 @@ impl QueryAdapter for BaseAdapter {
             .as_ref()
             .and_then(|path| path.strip_prefix(context.vault).ok())
             .map(|path| path.to_string_lossy().replace('\\', "/"));
-        for page in context.database.all_pages()? {
-            let mut value = page_value(&page);
-            if let Some(this_file) = &this_file {
-                let name = this_file
-                    .rsplit('/')
-                    .next()
-                    .unwrap_or(this_file)
-                    .trim_end_matches(".md");
-                value.as_object_mut().unwrap().insert(
-                    "this".to_owned(),
-                    serde_json::json!({
-                        "file": {
-                            "path": this_file,
-                            "name": name,
-                            "link": this_file
-                        }
-                    }),
-                );
+        let links = LinkIndex::build(context.database)?;
+        let pages = context.database.all_pages()?;
+        let this_value = this_file
+            .as_ref()
+            .and_then(|this_file| pages.iter().find(|page| page.path == *this_file))
+            .map(|page| page_value(page, &links));
+        for page in &pages {
+            let mut value = page_value(page, &links);
+            if let Some(this_value) = &this_value {
+                value
+                    .as_object_mut()
+                    .unwrap()
+                    .insert("this".to_owned(), this_value.clone());
             }
             if !matches_base_filter(global_filter, &value)?
                 || !matches_base_filter(view_filter, &value)?
             {
                 continue;
             }
+            // Run multiple passes so formulas can reference each other.
             for _ in 0..formulas.len().max(1) {
                 for (name, source) in &formulas {
                     let Some(source) = source.as_str() else {
@@ -104,7 +106,7 @@ impl QueryAdapter for BaseAdapter {
                 values.sort_by(|left, right| {
                     let left = field(left, property);
                     let right = field(right, property);
-                    let ordering = value_order(left, right).unwrap_or(std::cmp::Ordering::Equal);
+                    let ordering = value_order(left, right).unwrap_or(Ordering::Equal);
                     if descending {
                         ordering.reverse()
                     } else {
@@ -114,11 +116,196 @@ impl QueryAdapter for BaseAdapter {
             }
         }
 
-        let rows = values
-            .into_iter()
-            .map(|value| project(value, &order))
-            .collect();
-        Ok(RecordSet::new("base", rows))
+        if let Some(limit) = view.and_then(|v| v.get("limit")).and_then(Value::as_u64) {
+            values.truncate(limit as usize);
+        }
+
+        let view_summaries = view
+            .and_then(|v| v.get("summaries"))
+            .and_then(Value::as_object)
+            .cloned()
+            .unwrap_or_default();
+        let mut computed_summaries: Row = Row::new();
+        for (property, summary_name) in &view_summaries {
+            let col_values: Vec<&Value> = values.iter().map(|row| field(row, property)).collect();
+            let result = compute_summary(
+                summary_name.as_str().unwrap_or(""),
+                &col_values,
+                &custom_summaries,
+            );
+            computed_summaries.insert(property.clone(), result);
+        }
+
+        let group_by = view
+            .and_then(|v| v.get("groupBy"))
+            .and_then(Value::as_object);
+
+        let rows: Vec<Row> = if let Some(group_by) = group_by {
+            let property = group_by
+                .get("property")
+                .and_then(Value::as_str)
+                .unwrap_or("");
+            let descending = group_by
+                .get("direction")
+                .and_then(Value::as_str)
+                .is_some_and(|d| d.eq_ignore_ascii_case("desc"));
+            let mut groups: BTreeMap<String, Vec<Value>> = BTreeMap::new();
+            for value in &values {
+                let raw = field(value, property);
+                let key = raw
+                    .as_str()
+                    .map(str::to_owned)
+                    .unwrap_or_else(|| raw.to_string());
+                groups.entry(key).or_default().push(value.clone());
+            }
+            // BTreeMap iterates in ascending key order; reverse if descending.
+            let mut group_entries: Vec<(String, Vec<Value>)> = groups.into_iter().collect();
+            if descending {
+                group_entries.reverse();
+            }
+            group_entries
+                .into_iter()
+                .map(|(key, group_rows)| {
+                    let projected: Vec<Value> = group_rows
+                        .into_iter()
+                        .map(|v| Value::Object(project(v, &order).into_iter().collect()))
+                        .collect();
+                    let mut row = Row::new();
+                    row.insert("key".to_owned(), Value::String(key));
+                    row.insert("rows".to_owned(), Value::Array(projected));
+                    row
+                })
+                .collect()
+        } else {
+            values
+                .into_iter()
+                .map(|value| project(value, &order))
+                .collect()
+        };
+
+        let mut result = RecordSet::new("base", rows);
+        result.summaries = computed_summaries;
+        Ok(result)
+    }
+}
+
+fn compute_summary(
+    name: &str,
+    values: &[&Value],
+    custom_summaries: &serde_json::Map<String, Value>,
+) -> Value {
+    match name {
+        "Count" => json!(values.len()),
+        "Sum" => {
+            let sum: f64 = values.iter().filter_map(|v| v.as_f64()).sum();
+            json!(sum)
+        }
+        "Average" => {
+            let nums: Vec<f64> = values.iter().filter_map(|v| v.as_f64()).collect();
+            if nums.is_empty() {
+                Value::Null
+            } else {
+                json!(nums.iter().sum::<f64>() / nums.len() as f64)
+            }
+        }
+        "Min" => values
+            .iter()
+            .copied()
+            .filter(|v| !v.is_null())
+            .min_by(|a, b| value_order(a, b).unwrap_or(Ordering::Equal))
+            .cloned()
+            .unwrap_or(Value::Null),
+        "Max" => values
+            .iter()
+            .copied()
+            .filter(|v| !v.is_null())
+            .max_by(|a, b| value_order(a, b).unwrap_or(Ordering::Equal))
+            .cloned()
+            .unwrap_or(Value::Null),
+        "Range" => {
+            let mut non_null: Vec<&Value> =
+                values.iter().copied().filter(|v| !v.is_null()).collect();
+            non_null.sort_by(|a, b| value_order(a, b).unwrap_or(Ordering::Equal));
+            if let (Some(min), Some(max)) = (
+                non_null.first().and_then(|v| as_datetime(v)),
+                non_null.last().and_then(|v| as_datetime(v)),
+            ) {
+                return json!(max.signed_duration_since(min).num_milliseconds() as f64);
+            }
+            match (
+                non_null.first().and_then(|v| v.as_f64()),
+                non_null.last().and_then(|v| v.as_f64()),
+            ) {
+                (Some(min), Some(max)) => json!(max - min),
+                _ => Value::Null,
+            }
+        }
+        "Median" => {
+            let mut nums: Vec<f64> = values.iter().filter_map(|v| v.as_f64()).collect();
+            if nums.is_empty() {
+                return Value::Null;
+            }
+            nums.sort_by(|a, b| a.partial_cmp(b).unwrap_or(Ordering::Equal));
+            let mid = nums.len() / 2;
+            if nums.len() % 2 == 0 {
+                json!((nums[mid - 1] + nums[mid]) / 2.0)
+            } else {
+                json!(nums[mid])
+            }
+        }
+        "Stddev" => {
+            let nums: Vec<f64> = values.iter().filter_map(|v| v.as_f64()).collect();
+            if nums.is_empty() {
+                return Value::Null;
+            }
+            let mean = nums.iter().sum::<f64>() / nums.len() as f64;
+            let variance = nums.iter().map(|x| (x - mean).powi(2)).sum::<f64>() / nums.len() as f64;
+            json!(variance.sqrt())
+        }
+        "Earliest" => values
+            .iter()
+            .copied()
+            .filter(|v| as_datetime(v).is_some())
+            .min_by(|a, b| value_order(a, b).unwrap_or(Ordering::Equal))
+            .cloned()
+            .unwrap_or(Value::Null),
+        "Latest" => values
+            .iter()
+            .copied()
+            .filter(|v| as_datetime(v).is_some())
+            .max_by(|a, b| value_order(a, b).unwrap_or(Ordering::Equal))
+            .cloned()
+            .unwrap_or(Value::Null),
+        "Checked" => json!(values.iter().filter(|v| v.as_bool() == Some(true)).count()),
+        "Unchecked" => json!(values.iter().filter(|v| v.as_bool() == Some(false)).count()),
+        "Empty" => json!(
+            values
+                .iter()
+                .filter(|v| v.is_null() || v.as_str() == Some(""))
+                .count()
+        ),
+        "Filled" => json!(
+            values
+                .iter()
+                .filter(|v| !v.is_null() && v.as_str() != Some(""))
+                .count()
+        ),
+        "Unique" => {
+            use std::collections::HashSet;
+            let unique: HashSet<String> = values.iter().map(|v| v.to_string()).collect();
+            json!(unique.len())
+        }
+        custom_name => {
+            if let Some(formula) = custom_summaries.get(custom_name).and_then(Value::as_str) {
+                let values_arr = Value::Array(values.iter().map(|v| (*v).clone()).collect());
+                let ctx = json!({"values": values_arr});
+                Expr::parse(formula)
+                    .map(|expr| expr.eval(&ctx))
+                    .unwrap_or(Value::Null)
+            } else {
+                Value::Null
+            }
+        }
     }
 }
 
@@ -141,9 +328,10 @@ fn matches_base_filter(filter: Option<&Value>, row: &Value) -> Result<bool> {
                 .context("Base or filter must be an array")?,
             row,
         ),
-        Value::Object(object) if object.contains_key("not") => {
-            Ok(!matches_base_filter(object.get("not"), row)?)
-        }
+        Value::Object(object) if object.contains_key("not") => match object.get("not") {
+            Some(Value::Array(filters)) => Ok(!any_filters(filters, row)?),
+            filter => Ok(!matches_base_filter(filter, row)?),
+        },
         _ => Ok(true),
     }
 }
@@ -205,6 +393,109 @@ mod tests {
                 })
             )
             .unwrap()
+        );
+    }
+
+    #[test]
+    fn compute_summary_count() {
+        let vals = vec![json!(1), json!(2), json!(3)];
+        let refs: Vec<&Value> = vals.iter().collect();
+        let result = compute_summary("Count", &refs, &Default::default());
+        assert_eq!(result, json!(3));
+    }
+
+    #[test]
+    fn compute_summary_sum_average() {
+        let vals = vec![json!(10.0), json!(20.0), json!(30.0)];
+        let refs: Vec<&Value> = vals.iter().collect();
+        assert_eq!(
+            compute_summary("Sum", &refs, &Default::default()),
+            json!(60.0)
+        );
+        assert_eq!(
+            compute_summary("Average", &refs, &Default::default()),
+            json!(20.0)
+        );
+    }
+
+    #[test]
+    fn compute_summary_min_max() {
+        let vals = vec![json!(5), json!(1), json!(9)];
+        let refs: Vec<&Value> = vals.iter().collect();
+        assert_eq!(compute_summary("Min", &refs, &Default::default()), json!(1));
+        assert_eq!(compute_summary("Max", &refs, &Default::default()), json!(9));
+    }
+
+    #[test]
+    fn compute_summary_median_even() {
+        let vals = vec![json!(1.0), json!(3.0), json!(5.0), json!(7.0)];
+        let refs: Vec<&Value> = vals.iter().collect();
+        assert_eq!(
+            compute_summary("Median", &refs, &Default::default()),
+            json!(4.0)
+        );
+    }
+
+    #[test]
+    fn compute_summary_unique_filled_empty() {
+        let vals = vec![json!("a"), json!("b"), json!("a"), Value::Null];
+        let refs: Vec<&Value> = vals.iter().collect();
+        assert_eq!(
+            compute_summary("Unique", &refs, &Default::default()),
+            json!(3)
+        );
+        assert_eq!(
+            compute_summary("Filled", &refs, &Default::default()),
+            json!(3)
+        );
+        assert_eq!(
+            compute_summary("Empty", &refs, &Default::default()),
+            json!(1)
+        );
+    }
+
+    #[test]
+    fn compute_summary_checked_unchecked() {
+        let vals = vec![json!(true), json!(false), json!(true), Value::Null];
+        let refs: Vec<&Value> = vals.iter().collect();
+        assert_eq!(
+            compute_summary("Checked", &refs, &Default::default()),
+            json!(2)
+        );
+        assert_eq!(
+            compute_summary("Unchecked", &refs, &Default::default()),
+            json!(1)
+        );
+    }
+
+    #[test]
+    fn compute_summary_range() {
+        let vals = vec![json!(2.0), json!(8.0), json!(5.0)];
+        let refs: Vec<&Value> = vals.iter().collect();
+        assert_eq!(
+            compute_summary("Range", &refs, &Default::default()),
+            json!(6.0)
+        );
+    }
+
+    #[test]
+    fn compute_summary_stddev() {
+        let vals = vec![
+            json!(2.0),
+            json!(4.0),
+            json!(4.0),
+            json!(4.0),
+            json!(5.0),
+            json!(5.0),
+            json!(7.0),
+            json!(9.0),
+        ];
+        let refs: Vec<&Value> = vals.iter().collect();
+        let result = compute_summary("Stddev", &refs, &Default::default());
+        let stddev = result.as_f64().unwrap();
+        assert!(
+            (stddev - 2.0).abs() < 1e-10,
+            "expected stddev ~2.0, got {stddev}"
         );
     }
 }

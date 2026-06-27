@@ -4,24 +4,45 @@ or_expr = { and_expr ~ (OR ~ and_expr)* }
 and_expr = { unary_expr ~ (AND ~ unary_expr)* }
 unary_expr = { NOT* ~ comparison }
 comparison = { sum ~ (operator ~ sum)? }
-sum = { postfix ~ (add_operator ~ postfix)* }
+sum = { product ~ (add_operator ~ product)* }
 add_operator = { "+" | "-" }
-postfix = { primary ~ method_call* }
-primary = { function_call | list | string | date_literal | number | boolean | null | identifier | "(" ~ or_expr ~ ")" }
+product = { postfix ~ (mul_operator ~ postfix)* }
+mul_operator = { "*" | "/" | "%" }
+postfix = { primary ~ (method_call | field_call | index_call)* }
+primary = {
+    function_call
+  | object
+  | list
+  | regex
+  | string
+  | date_literal
+  | number
+  | boolean
+  | null
+  | identifier
+  | "(" ~ or_expr ~ ")"
+}
 function_call = { identifier ~ "(" ~ arguments? ~ ")" }
 method_call = { "." ~ identifier ~ "(" ~ arguments? ~ ")" }
+field_call = { "." ~ identifier }
+index_call = { "[" ~ or_expr ~ "]" }
 arguments = { or_expr ~ ("," ~ or_expr)* }
 list = { "[" ~ (or_expr ~ ("," ~ or_expr)*)? ~ "]" }
+object = { "{" ~ (object_entry ~ ("," ~ object_entry)*)? ~ "}" }
+object_entry = { object_key ~ ":" ~ or_expr }
+object_key = { string | identifier }
 operator = { ">=" | "<=" | "!=" | "==" | "=" | ">" | "<" }
-OR = _{ ^"or" | "||" }
-AND = _{ ^"and" | "&&" }
-NOT = { ^"not" | "!" }
-boolean = { ^"true" | ^"false" }
-null = { ^"null" }
+identifier_char = _{ ASCII_ALPHANUMERIC | "_" | "-" | "#" | NON_ASCII }
+OR = _{ (^"or" ~ !identifier_char) | "||" }
+AND = _{ (^"and" ~ !identifier_char) | "&&" }
+NOT = { (^"not" ~ !identifier_char) | "!" }
+boolean = { (^"true" | ^"false") ~ !identifier_char }
+null = { ^"null" ~ !identifier_char }
 number = @{ "-"? ~ ASCII_DIGIT+ ~ ("." ~ ASCII_DIGIT+)? }
 date_literal = @{ ASCII_DIGIT{4} ~ "-" ~ ASCII_DIGIT{2} ~ "-" ~ ASCII_DIGIT{2} }
 string = @{ single_string | double_string }
 single_string = { "'" ~ ("\\'" | !"'" ~ ANY)* ~ "'" }
 double_string = { "\"" ~ ("\\\"" | !"\"" ~ ANY)* ~ "\"" }
-identifier = @{ (ASCII_ALPHANUMERIC | "_" | "-" | "#" | "/" | NON_ASCII)+ ~ ("." ~ (ASCII_ALPHANUMERIC | "_" | "-" | "#" | "/" | NON_ASCII)+)* }
+regex = @{ "/" ~ (("\\" ~ ANY) | !("/" | NEWLINE) ~ ANY)+ ~ "/" ~ ASCII_ALPHA* }
+identifier = @{ (ASCII_ALPHANUMERIC | "_" | "-" | "#" | NON_ASCII)+ }
 NON_ASCII = _{ '\u{80}'..'\u{10ffff}' }

@@ -15,6 +15,9 @@ pub struct RecordSet {
     pub rows: Vec<Row>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub diagnostics: Vec<String>,
+    /// Per-property aggregate values from a Base view's `summaries` mapping.
+    #[serde(skip_serializing_if = "Row::is_empty")]
+    pub summaries: Row,
 }
 
 impl RecordSet {
@@ -32,6 +35,7 @@ impl RecordSet {
             columns,
             rows,
             diagnostics: Vec::new(),
+            summaries: Row::new(),
         }
     }
 }

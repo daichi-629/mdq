@@ -285,44 +285,94 @@ Input:
   mdq query --language base --file path/to/view.base
   mdq query --language base --file view.base --current Daily/2026-06-14.md
 
-Supported document fields:
-  filters
-  formulas
-  views[0].filters
-  views[0].order
-  views[0].sort
+Supported document-level fields:
+  filters          global filter applied before views
+  formulas         map of name → expression; available as `formula.<name>`
+  summaries        map of name → custom aggregation expression
 
-Filter forms:
-  filters:
-    and: [EXPR, ...]
-  filters:
-    or: [EXPR, ...]
-  filters:
-    not: EXPR
+Supported view fields (views[0]):
+  filters          per-view filter
+  order            list of property paths to project (column selection)
+  sort             list of {property, direction} objects
+  limit            integer row cap applied after sort
+  groupBy          {property, direction} — emits {key, rows} records
+  summaries        map of property → summary-type name
 
 Expressions:
-  and, or, not
-  =, ==, !=, >, >=, <, <=
-  + and -
-  field paths such as `file.path`, `formula.name`, and arbitrary frontmatter
-  string, number, boolean, null, and list literals
+  Booleans:  and, or, not, &&, ||, !
+  Operators: =, ==, !=, >, >=, <, <=
+  Arithmetic: +, -, *, /, %
+  Field paths: `file.name`, `formula.label`, `note.score`, arbitrary frontmatter
+  Literals: string, number, boolean, null
+  Literals: list [a, b, c], object {key: value}
+  Index access: value[0], map["key"]
+  Regex: /pattern/flags
 
-Functions and methods:
-  date(value), today(), if(condition, yes, no), length(value)
-  contains(a, b), icontains(a, b), startswith(a, b), endswith(a, b)
-  value.contains(x), value.startsWith(x), value.endsWith(x)
-  file.inFolder(folder), file.hasProperty(name), file.hasTag(tag)
-  value.date(), value.format(pattern), value.asLink()
+Global functions:
+  if(cond, yes, no)         conditional
+  date(value)               parse to date object
+  today(), now()            current date/datetime
+  duration(string)          parse duration string (e.g. "7d", "2 weeks")
+  list(a, b, ...)           build a list
+  min(a, b, ...) / max(...) numeric min/max
+  number(value)             coerce to number
+  length(value)             string length, array length, or object key count
+  contains(a, b)            substring, array element, or object key check
+  icontains(a, b)           case-insensitive contains
+  startswith(a, b)          string prefix
+  endswith(a, b)            string suffix
+  join(list, sep)           join array to string
+  file(path)                build file stub from path
+  link(value, display)      build a link value
+  html(value)               wrap as HTML value
+  icon(name)                build an icon value
+  image(path)               build an image value
 
-`this.file` is available when `--current` is supplied. Formulas are evaluated
-iteratively so later formulas may reference `formula.<name>`.
+String methods (.method()):
+  .lower() / .upper() / .title() / .trim() / .reverse()
+  .contains(x) / .containsAll(a,b) / .containsAny(a,b)
+  .startsWith(x) / .endsWith(x)
+  .replace(pat, rep) — pat may be a regex literal
+  .split(sep, limit?) / .slice(start, end?)
+  .repeat(n) / .length
+  .date() — parse string as date
+  .format(pattern) — Moment.js format string
+
+Number methods:
+  .abs() / .ceil() / .floor() / .round(digits?) / .toFixed(n)
+
+List methods:
+  .contains(x) / .containsAll(a,b) / .containsAny(a,b)
+  .filter(expr) / .map(expr) / .reduce(expr, init?)
+  .sort() / .reverse() / .unique() / .flat()
+  .slice(start, end?) / .join(sep) / .length
+
+Date methods:
+  .date() / .format(pattern) / .time() / .relative()
+  .year / .month / .day / .hour / .minute / .second
+
+File methods:
+  .inFolder(path) / .hasTag(tag) / .hasProperty(name)
+  .asLink(display?) / .hasLink(path)
+
+Link methods:
+  .asFile() / .linksTo(path)
+
+Named summary types (for views[0].summaries):
+  Count, Sum, Average, Min, Max, Range, Median, Stddev
+  Earliest, Latest (date values)
+  Checked, Unchecked (boolean values)
+  Empty, Filled (null/empty-string check)
+  Unique (distinct count)
+  Any name defined in document-level `summaries` (custom formula with `values`)
+
+`this.file` is available when `--current` is supplied. Formulas run multiple
+passes so later formulas may reference `formula.<name>` from earlier ones.
 
 Compatibility limits:
-  - The first view is executed.
+  - Only the first view entry is executed.
   - Rendering configuration and column sizes are ignored.
-  - Date arithmetic currently supports quoted day durations such as `'1d'`.
-  - Link values are represented as structured/string values, not Obsidian UI
-    objects."#;
+  - Link values are structured objects, not Obsidian UI wikilink objects."#;
 
 const DATAVIEW: &str = r#"# Dataview DQL-compatible query
 

@@ -10,8 +10,8 @@ use crate::core::{QueryAdapter, QueryContext, RecordSet, Row};
 use crate::script::{QuickJsEngine, ScriptEngine};
 
 use super::expr::{Expr, value_order};
-use super::page_value;
 use super::tasks::collect_tasks;
+use super::{LinkIndex, page_value};
 
 pub struct DataviewAdapter;
 pub struct DataviewJsAdapter;
@@ -26,11 +26,12 @@ impl QueryAdapter for DataviewAdapter {
         let mut values = if query.kind == "task" {
             collect_tasks(context)?
         } else {
+            let links = LinkIndex::build(context.database)?;
             context
                 .database
                 .all_pages()?
                 .iter()
-                .map(page_value)
+                .map(|page| page_value(page, &links))
                 .collect()
         };
         values.retain(|value| query.source.matches(value));
@@ -325,11 +326,12 @@ impl QueryAdapter for DataviewJsAdapter {
 
     fn execute(&self, context: &QueryContext<'_>, source: &str) -> Result<RecordSet> {
         let tasks = collect_tasks(context)?;
+        let links = LinkIndex::build(context.database)?;
         let mut pages: Vec<Value> = context
             .database
             .all_pages()?
             .iter()
-            .map(page_value)
+            .map(|page| page_value(page, &links))
             .collect();
         for page in &mut pages {
             let path = page["file"]["path"].as_str().unwrap_or_default();
