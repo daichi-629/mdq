@@ -234,23 +234,47 @@ fn main() -> Result<()> {
                 }
                 let expression = mdq::query::Expression::parse(&source)?;
                 let mut notes = database.query_frontmatter(&expression)?;
+                let total = notes.len();
                 notes.truncate(limit);
+                if total > limit {
+                    eprintln!("note: {total} results found, showing first {limit} (use --limit to adjust)");
+                }
                 output_notes(&notes, cli.json)?;
             } else {
-                let current_file = current.map(|path| {
-                    if path.is_absolute() {
-                        path
-                    } else {
-                        vault.join(path)
-                    }
-                });
+                let current_file = current
+                    .map(|path| {
+                        let resolved = if path.is_absolute() {
+                            path
+                        } else {
+                            vault.join(&path)
+                        };
+                        if !resolved.exists() {
+                            bail!(
+                                "--current path does not exist: {}",
+                                resolved.display()
+                            );
+                        }
+                        if !resolved.starts_with(&vault) {
+                            bail!(
+                                "--current path must be inside the vault ({}): {}",
+                                vault.display(),
+                                resolved.display()
+                            );
+                        }
+                        Ok(resolved)
+                    })
+                    .transpose()?;
                 let context = QueryContext {
                     database: &database,
                     vault: &vault,
                     current_file,
                 };
                 let mut result = compatibility.execute(&language, &context, &source)?;
+                let total = result.rows.len();
                 result.rows.truncate(limit);
+                if total > limit {
+                    eprintln!("note: {total} results found, showing first {limit} (use --limit to adjust)");
+                }
                 output_record_set(&result, cli.json)?;
             }
         }
@@ -306,11 +330,18 @@ fn main() -> Result<()> {
                 ensure_embeddings_fresh(&mut database, &vault, cli.auto_threshold)?;
             }
             let mut hits = pipeline.execute(&database, &stages)?;
+            let total = hits.len();
             if context {
                 let context = build_context(&database, hits, limit, max_chars)?;
+                if total > limit {
+                    eprintln!("note: {total} results found, showing first {limit} (use --limit to adjust)");
+                }
                 output_context(context, cli.json, verbose)?;
             } else {
                 hits.truncate(limit);
+                if total > limit {
+                    eprintln!("note: {total} results found, showing first {limit} (use --limit to adjust)");
+                }
                 output_hits(&hits, cli.json, verbose)?;
             }
         }
@@ -323,6 +354,7 @@ fn main() -> Result<()> {
                     "vault: {}",
                     status.vault.as_deref().unwrap_or("<not indexed>")
                 );
+                println!("has_index: {}", status.has_index);
                 println!(
                     "indexed_at: {}",
                     status.indexed_at.as_deref().unwrap_or("-")
@@ -347,6 +379,15 @@ fn main() -> Result<()> {
 /// already-indexed vault is refreshed automatically; a large or first-time drift requires
 /// an explicit `index` run, since that may mean the wrong vault or an unbuilt index.
 fn ensure_index_fresh(database: &mut Database, vault: &Path, threshold: usize) -> Result<()> {
+    if let Some(indexed) = database.indexed_vault()? {
+        if indexed != vault.to_string_lossy().as_ref() {
+            bail!(
+                "database was built for a different vault ({}); run `mdq --vault {} index` to re-index for this vault",
+                indexed,
+                vault.display()
+            );
+        }
+    }
     let changed = database.staleness(vault)?;
     if changed == 0 {
         return Ok(());
@@ -376,7 +417,7 @@ fn ensure_embeddings_fresh(database: &mut Database, vault: &Path, threshold: usi
         Ok(())
     } else {
         bail!(
-            "embeddings are missing or stale ({missing} chunk(s)); run `mdq --vault {} index` to refresh",
+            "embeddings are missing or stale ({missing} chunk(s)); run `mdq --vault {} index` to refresh, or use `--only bm25` to search without embeddings",
             vault.display()
         )
     }
@@ -496,7 +537,11 @@ fn build_context(
         }
         let header_len = hit.path.chars().count()
             + hit.heading.as_deref().map(|h| 1 + h.chars().count()).unwrap_or(0);
-        let text: String = body.chars().take(remaining.saturating_sub(header_len)).collect();
+        let text_budget = remaining.saturating_sub(header_len);
+        if text_budget == 0 {
+            continue;
+        }
+        let text: String = body.chars().take(text_budget).collect();
         used += header_len + text.chars().count();
         context.push(ContextItem {
             path: hit.path,

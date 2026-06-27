@@ -37,6 +37,17 @@ impl QueryAdapter for TasksAdapter {
                 .iter()
                 .all(|filter| filter.matches(row, &query_context, &script))
         });
+        let mut sort_diagnostics = Vec::new();
+        for sort in &query.sorts {
+            if let TaskSort::Field(field, _) = sort {
+                if !tasks.is_empty() && tasks.iter().all(|t| t.get(field).is_none()) {
+                    sort_diagnostics.push(format!(
+                        "sort field '{}' does not exist on any task — possible typo",
+                        field
+                    ));
+                }
+            }
+        }
         for sort in query.sorts.iter().rev() {
             tasks.sort_by(|left, right| sort.compare(left, right, &query_context, &script));
         }
@@ -53,6 +64,7 @@ impl QueryAdapter for TasksAdapter {
         };
         let mut result = RecordSet::new("tasks", rows);
         result.diagnostics = query.diagnostics;
+        result.diagnostics.extend(sort_diagnostics);
         Ok(result)
     }
 }
@@ -85,6 +97,7 @@ struct TaskQuery {
 }
 
 enum TaskFilter {
+    Never,
     Done(bool),
     Date {
         field: String,
@@ -170,6 +183,9 @@ impl TaskQuery {
                 query
                     .diagnostics
                     .push(format!("unsupported Tasks instruction: {line}"));
+                // Treat unrecognised instructions as never-matching filters so the query
+                // returns zero results rather than silently bypassing the intent.
+                query.filters.push(TaskFilter::Never);
             }
         }
         Ok(query)
@@ -263,6 +279,7 @@ fn parse_filter(line: &str) -> Option<TaskFilter> {
 impl TaskFilter {
     fn matches(&self, row: &Value, query: &Value, script: &dyn ScriptEngine) -> bool {
         match self {
+            Self::Never => false,
             Self::Done(expected) => row["done"].as_bool() == Some(*expected),
             Self::Date {
                 field,

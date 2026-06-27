@@ -3,7 +3,7 @@ use std::collections::{HashMap, HashSet};
 use anyhow::{Context, Result, bail};
 
 use crate::db::Database;
-use crate::model::SearchHit;
+use crate::model::{NoteRef, SearchHit};
 use crate::query::{NativeQueryLanguage, QueryLanguage};
 use crate::semantic;
 
@@ -124,16 +124,30 @@ impl StageExecutor for FilterStage {
             .get(language_name)
             .with_context(|| format!("unknown query language: {language_name}"))?;
         let expression = language.parse(source)?;
-        let paths: HashSet<String> = context
+        let matched: Vec<NoteRef> = context
             .database
-            .query_frontmatter(expression.as_ref())?
+            .query_frontmatter(expression.as_ref())?;
+        let matched_paths: HashSet<&str> = matched.iter().map(|n| n.path.as_str()).collect();
+        let input_paths: HashSet<String> = input.iter().map(|h| h.path.clone()).collect();
+        let mut hits: Vec<SearchHit> = input
             .into_iter()
-            .map(|note| note.path)
+            .filter(|candidate| matched_paths.contains(candidate.path.as_str()))
             .collect();
-        Ok(input
-            .into_iter()
-            .filter(|candidate| paths.contains(&candidate.path))
-            .collect())
+        // Frontmatter-only notes have no chunks in the input set; add them as synthetic hits
+        // so they remain visible in filter-only pipelines.
+        for note in matched {
+            if !input_paths.contains(note.path.as_str()) {
+                hits.push(SearchHit {
+                    chunk_id: -1,
+                    path: note.path,
+                    title: note.title,
+                    heading: None,
+                    score: 0.0,
+                    snippet: String::new(),
+                });
+            }
+        }
+        Ok(hits)
     }
 }
 
@@ -250,6 +264,36 @@ mod tests {
         assert_eq!(stage.name, "filter");
         assert_eq!(stage.language.as_deref(), Some("dataview"));
         assert_eq!(stage.argument, "status = active");
+    }
+
+    #[test]
+    fn filter_stage_includes_frontmatter_only_notes() {
+        let directory = tempfile::tempdir().unwrap();
+        let vault = directory.path().join("notes");
+        fs::create_dir_all(&vault).unwrap();
+        fs::write(
+            vault.join("meta_only.md"),
+            "---\nkind: config\n---\n",
+        )
+        .unwrap();
+        fs::write(
+            vault.join("with_body.md"),
+            "---\nkind: config\n---\n# Body\nsome content\n",
+        )
+        .unwrap();
+        let mut database = Database::open(&directory.path().join("index.sqlite3")).unwrap();
+        database.rebuild(&vault).unwrap();
+        let engine = PipelineEngine::standard();
+
+        let hits = engine
+            .execute(
+                &database,
+                &[StageSpec::parse("filter:kind = config").unwrap()],
+            )
+            .unwrap();
+        let paths: Vec<&str> = hits.iter().map(|h| h.path.as_str()).collect();
+        assert!(paths.contains(&"meta_only.md"), "frontmatter-only note must appear in filter output");
+        assert!(paths.contains(&"with_body.md"));
     }
 
     #[test]

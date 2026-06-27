@@ -347,11 +347,16 @@ impl Database {
         })?;
         let mut matches = Vec::new();
         for row in rows {
-            let (path, title, json) = row?;
-            if serde_json::from_str(&json)
-                .ok()
-                .is_some_and(|value| expression.matches(&value))
-            {
+            let (path, file_stem_title, json) = row?;
+            let value: Option<serde_json::Value> = serde_json::from_str(&json).ok();
+            if value.as_ref().is_some_and(|v| expression.matches(v)) {
+                // Prefer the frontmatter `title` field so that the JSON output is consistent
+                // with what the filter expression matched against.
+                let title = value
+                    .as_ref()
+                    .and_then(|v| v["title"].as_str())
+                    .map(str::to_owned)
+                    .unwrap_or(file_stem_title);
                 matches.push(NoteRef { path, title });
             }
         }
@@ -537,6 +542,7 @@ impl Database {
             None => true,
         };
         Ok(Status {
+            has_index: vault.is_some(),
             vault,
             indexed_at: self.metadata("indexed_at")?,
             notes: count("notes")?,
@@ -672,23 +678,38 @@ impl Database {
             .map_err(Into::into)
     }
 
+    /// Returns the path of the vault that was last indexed into this database.
+    pub fn indexed_vault(&self) -> Result<Option<String>> {
+        self.metadata("vault")
+    }
+
     fn resolve_note_id(&self, input: &str) -> Result<Option<i64>> {
         let normalized = normalize_target(input);
         let filename = normalized.rsplit('/').next().unwrap_or(&normalized);
-        let mut statement = self.connection.prepare(
+        // Try exact path match first — this is always unambiguous even when another note
+        // shares the same filename or title.
+        let mut path_stmt = self.connection.prepare(
             "
             SELECT id FROM notes
             WHERE lower(path) = ?1 || '.md'
                OR lower(substr(path, 1, length(path) - 3)) = ?1
-               OR lower(title) = ?2
-            ORDER BY CASE WHEN lower(substr(path, 1, length(path) - 3)) = ?1 THEN 0 ELSE 1 END
             LIMIT 2
             ",
         )?;
-        let ids = statement
-            .query_map(params![normalized, filename], |row| row.get(0))?
+        let path_ids = path_stmt
+            .query_map([&normalized], |row| row.get(0))?
             .collect::<rusqlite::Result<Vec<i64>>>()?;
-        Ok((ids.len() == 1).then(|| ids[0]))
+        if path_ids.len() == 1 {
+            return Ok(Some(path_ids[0]));
+        }
+        // Fall back to title / filename match (may be ambiguous).
+        let mut title_stmt = self.connection.prepare(
+            "SELECT id FROM notes WHERE lower(title) = ?1 LIMIT 2",
+        )?;
+        let title_ids = title_stmt
+            .query_map([filename], |row| row.get(0))?
+            .collect::<rusqlite::Result<Vec<i64>>>()?;
+        Ok((title_ids.len() == 1).then(|| title_ids[0]))
     }
 }
 
@@ -868,6 +889,7 @@ pub struct IndexStats {
 pub struct Status {
     pub vault: Option<String>,
     pub indexed_at: Option<String>,
+    pub has_index: bool,
     pub notes: usize,
     pub chunks: usize,
     pub links: usize,
@@ -947,6 +969,24 @@ mod tests {
         let paths: Vec<&str> = notes.iter().map(|n| n.path.as_str()).collect();
         assert!(paths.contains(&"meta_only.md"));
         assert!(paths.contains(&"with_body.md"));
+    }
+
+    #[test]
+    fn exact_path_resolves_despite_same_title_in_other_folder() {
+        let directory = tempfile::tempdir().unwrap();
+        let vault = directory.path().join("notes");
+        fs::create_dir_all(vault.join("a")).unwrap();
+        fs::create_dir_all(vault.join("b")).unwrap();
+        fs::write(vault.join("a/Alpha.md"), "# Alpha\n[[b/Alpha]]\n").unwrap();
+        fs::write(vault.join("b/Alpha.md"), "# Alpha\n").unwrap();
+        let mut database = Database::open(&directory.path().join("index.sqlite3")).unwrap();
+        database.rebuild(&vault).unwrap();
+
+        // Exact folder-qualified path must resolve even though both share the title "Alpha"
+        let links = database.outgoing_links("a/Alpha").unwrap();
+        assert_eq!(links.len(), 1);
+        let backlinks = database.backlinks("b/Alpha").unwrap();
+        assert_eq!(backlinks.len(), 1);
     }
 
     #[test]
