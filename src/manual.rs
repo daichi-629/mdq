@@ -107,8 +107,12 @@ Flags:
   --only bm25      BM25 full-text retrieval only
   --only rag       semantic embedding retrieval only
   --limit N        maximum results (default 8)
-  --max-chars N    total context character budget (default 2000)
+  --max-chars N    total context character budget (default 2000); counts
+                   path, heading label, and body text per result
   --verbose        include score and heading detail in the output
+
+JSON output schema (--json):
+  [{path: string, heading: string|null, score: number, text: string}, ...]
 
 `search` is a one-stage convenience over `pipeline` (`bm25+rag:QUERY` by
 default, or `bm25:QUERY` / `rag:QUERY` with `--only`)."#;
@@ -131,7 +135,14 @@ the note used by `this.file` (base) and `dv.current()` (dataviewjs).
 `--limit` truncates the result rows (default 100).
 
 `native` queries return matching notes. Every other language returns
-structured RecordSet rows (see `mdq manual extensions`)."#;
+structured RecordSet rows (see `mdq manual extensions`).
+
+JSON output schema (--json):
+  native:
+    [{path: string, title: string|null}, ...]
+  tasks, base, dataview, dataviewjs:
+    {kind: string, columns: string[], rows: object[],
+     diagnostics?: string[], summaries?: object}"#;
 
 const BACKLINKS: &str = r#"# backlinks command
 
@@ -211,7 +222,9 @@ Operators:
   in              value occurs in expected array
   starts_with     string prefix
   ends_with       string suffix
-  matches         regular expression
+  matches         regular expression; applies to a string field or to each
+                  element of an array field (any match = true); an invalid
+                  pattern is rejected at parse time with an error
   exists          path exists
   missing         path does not exist
 
@@ -222,6 +235,7 @@ chronologically.
 Examples:
   mdq query 'status = active and score >= 3'
   mdq query 'arbitrary.items contains value'
+  mdq query 'tags matches "daily"'
   mdq query 'date >= 2026-01-01'
   mdq query 'nested.key exists'
 
@@ -277,7 +291,9 @@ JavaScript functions run in the restricted runtime described under
 `mdq manual dataviewjs`. Unsupported instructions are reported as diagnostics
 instead of silently changing task semantics. A trailing `\` joins the next
 line, matching Tasks multiline function-query style. Function bodies receive
-`task`, `query`, and `task.file.property(name)`."#;
+`task`, `query`, and `task.file.property(name)`.
+
+Empty query: an empty source string applies no filters and returns all tasks."#;
 
 const BASE: &str = r#"# Base-compatible query
 
@@ -433,10 +449,12 @@ Security boundary:
   - QuickJS runs in-process with a 64 MiB memory limit, 512 KiB stack limit,
     and 500 ms interrupt deadline.
   - No Obsidian `app`, Node `require` or `process`, network `fetch`,
-    XMLHttpRequest, WebSocket, DOM `document`, or `window`.
+    XMLHttpRequest, WebSocket, DOM `document`, `window`, or `eval`.
   - `dv.io` and DOM rendering are disabled.
   - The vault is exposed as serialized read-only page/task data.
   - `dv.view` may only load a `.js` file beneath the selected vault.
+  - Treat DataviewJS and Tasks function scripts as trusted code — the sandbox
+    restricts host access, not script capabilities within the vault data.
 
 Output-producing calls are captured as structured RecordSet rows. This is a
 CLI compatibility layer, not a browser or Obsidian renderer."#;

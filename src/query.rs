@@ -115,15 +115,15 @@ impl Predicate {
                 value.ends_with(suffix)
             }),
             Operator::Matches => pair(actual, self.expected.as_ref(), |actual, expected| {
-                actual
-                    .as_str()
-                    .zip(expected.as_str())
-                    .and_then(|(actual, pattern)| {
-                        Regex::new(pattern)
-                            .ok()
-                            .map(|pattern| pattern.is_match(actual))
-                    })
-                    .unwrap_or(false)
+                let Some(pattern) = expected.as_str() else { return false; };
+                let Ok(re) = Regex::new(pattern) else { return false; };
+                match actual {
+                    Value::String(s) => re.is_match(s),
+                    Value::Array(items) => items
+                        .iter()
+                        .any(|item| item.as_str().is_some_and(|s| re.is_match(s))),
+                    _ => false,
+                }
             }),
             Operator::Greater | Operator::GreaterEqual | Operator::Less | Operator::LessEqual => {
                 actual
@@ -188,6 +188,12 @@ fn build_predicate(pair: Pair<'_, Rule>) -> Result<Expression> {
         _ => bail!("unexpected predicate operator"),
     };
     let expected = inner.next().map(|value| parse_value(value.as_str()));
+    if matches!(operator, Operator::Matches) {
+        if let Some(Value::String(pattern)) = &expected {
+            Regex::new(pattern)
+                .with_context(|| format!("invalid regular expression: {pattern}"))?;
+        }
+    }
     Ok(Expression::Predicate(Predicate {
         path,
         operator,
@@ -396,6 +402,27 @@ mod tests {
         );
         assert!(
             Expression::parse("name matches \"^research-\"")
+                .unwrap()
+                .matches(&value)
+        );
+    }
+
+    #[test]
+    fn invalid_regex_is_rejected_at_parse_time() {
+        let err = Expression::parse("title matches \"[invalid\"").unwrap_err();
+        assert!(err.to_string().contains("invalid regular expression"));
+    }
+
+    #[test]
+    fn matches_applies_to_array_elements() {
+        let value = json!({"tags": ["daily", "work", "project"]});
+        assert!(
+            Expression::parse("tags matches \"dai\"")
+                .unwrap()
+                .matches(&value)
+        );
+        assert!(
+            !Expression::parse("tags matches \"^xyz\"")
                 .unwrap()
                 .matches(&value)
         );

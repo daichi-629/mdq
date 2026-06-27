@@ -688,7 +688,7 @@ impl Database {
         let ids = statement
             .query_map(params![normalized, filename], |row| row.get(0))?
             .collect::<rusqlite::Result<Vec<i64>>>()?;
-        Ok((ids.len() == 1).then_some(ids[0]))
+        Ok((ids.len() == 1).then(|| ids[0]))
     }
 }
 

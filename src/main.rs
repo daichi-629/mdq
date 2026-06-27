@@ -222,6 +222,9 @@ fn main() -> Result<()> {
                 (None, None) => bail!("query source is required"),
             };
             if language == "native" {
+                if source.trim().is_empty() {
+                    bail!("query expression cannot be empty");
+                }
                 let hits = run_alias(&pipeline, &database, "filter", &source, usize::MAX)?;
                 let notes = unique_notes(&hits, limit);
                 output_notes(&notes, cli.json)?;
@@ -489,8 +492,10 @@ fn build_context(
         if remaining == 0 {
             break;
         }
-        let text: String = body.chars().take(remaining).collect();
-        used += text.chars().count();
+        let header_len = hit.path.chars().count()
+            + hit.heading.as_deref().map(|h| 1 + h.chars().count()).unwrap_or(0);
+        let text: String = body.chars().take(remaining.saturating_sub(header_len)).collect();
+        used += header_len + text.chars().count();
         context.push(ContextItem {
             path: hit.path,
             heading: hit.heading,

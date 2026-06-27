@@ -57,6 +57,7 @@ impl ScriptEngine for QuickJsEngine {
             let wrapped = format!(
                 r#"
                 "use strict";
+                globalThis.eval = undefined;
                 const app = undefined;
                 const require = undefined;
                 const process = undefined;
@@ -105,6 +106,17 @@ mod tests {
         assert_eq!(
             result,
             json!(["undefined", "undefined", "undefined", "undefined"])
+        );
+    }
+
+    #[test]
+    fn eval_is_blocked_in_sandbox() {
+        let err = QuickJsEngine::default()
+            .evaluate("return eval('1+1');", &json!({}))
+            .unwrap_err();
+        assert!(
+            err.to_string().contains("not a function") || err.to_string().contains("undefined"),
+            "expected eval to be blocked, got: {err}"
         );
     }
 }
