@@ -209,6 +209,9 @@ fn main() -> Result<()> {
             };
             let hits = run_alias(&pipeline, &database, stage, &query, fetch_limit)?;
             let context = build_context(&database, hits, limit, max_chars)?;
+            if context.len() == limit {
+                eprintln!("note: showing top {limit} results; use --limit to see more");
+            }
             output_context(context, cli.json, verbose)?;
         }
         Command::Query {
@@ -273,7 +276,13 @@ fn main() -> Result<()> {
                 let total = result.rows.len();
                 result.rows.truncate(limit);
                 if total > limit {
-                    eprintln!("note: {total} results found, showing first {limit} (use --limit to adjust)");
+                    let msg = format!(
+                        "{total} results found, showing first {limit} (use --limit to adjust)"
+                    );
+                    result.diagnostics.push(msg.clone());
+                    if !cli.json {
+                        eprintln!("note: {msg}");
+                    }
                 }
                 output_record_set(&result, cli.json)?;
             }
