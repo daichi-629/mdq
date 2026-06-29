@@ -107,7 +107,7 @@ Flags:
   --only bm25      BM25 full-text retrieval only
   --only rag       semantic embedding retrieval only
   --limit N        maximum results (default 8)
-  --max-chars N    total context character budget (default 2000); counts
+  --max-chars N    total context character budget (default: unlimited); counts
                    path, heading label, and body text per result
   --verbose        include score and heading detail in the output
 
@@ -184,7 +184,7 @@ Flags:
   --limit N        maximum results (default 10)
   --context        return full chunk context instead of search snippets
   --max-chars N    context character budget when `--context` is set
-                   (default 12000)
+                   (default: unlimited)
   --verbose        include score and heading detail in the output
 
 Example:

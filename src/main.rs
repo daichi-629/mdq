@@ -67,8 +67,9 @@ enum Command {
         query: String,
         #[arg(short, long, default_value_t = 8)]
         limit: usize,
-        #[arg(long, default_value_t = 2000)]
-        max_chars: usize,
+        /// Total character budget for context output (default: unlimited).
+        #[arg(long)]
+        max_chars: Option<usize>,
         /// Use only one retrieval engine instead of the hybrid default.
         #[arg(long, value_enum)]
         only: Option<SearchEngine>,
@@ -110,8 +111,9 @@ enum Command {
         /// Return full chunk context instead of search snippets.
         #[arg(long)]
         context: bool,
-        #[arg(long, default_value_t = 12000)]
-        max_chars: usize,
+        /// Total character budget for context output (default: unlimited).
+        #[arg(long)]
+        max_chars: Option<usize>,
         /// Include score and heading detail in the output.
         #[arg(short, long)]
         verbose: bool,
@@ -208,7 +210,7 @@ fn main() -> Result<()> {
                 None => ("bm25+rag", limit.saturating_mul(5).max(30)),
             };
             let hits = run_alias(&pipeline, &database, stage, &query, fetch_limit)?;
-            let context = build_context(&database, hits, limit, max_chars)?;
+            let context = build_context(&database, hits, limit, max_chars.unwrap_or(usize::MAX))?;
             if context.len() == limit {
                 eprintln!("note: showing top {limit} results; use --limit to see more");
             }
@@ -341,7 +343,7 @@ fn main() -> Result<()> {
             let mut hits = pipeline.execute(&database, &stages)?;
             let total = hits.len();
             if context {
-                let context = build_context(&database, hits, limit, max_chars)?;
+                let context = build_context(&database, hits, limit, max_chars.unwrap_or(usize::MAX))?;
                 if total > limit {
                     eprintln!("note: {total} results found, showing first {limit} (use --limit to adjust)");
                 }
