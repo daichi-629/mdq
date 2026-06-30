@@ -517,12 +517,12 @@ fn expand_views(context: &QueryContext<'_>, source: &str) -> Result<String> {
             file_view
         };
         let canonical_vault = context.vault.canonicalize()?;
-        let canonical_path = path
-            .canonicalize()
-            .with_context(|| format!(
+        let canonical_path = path.canonicalize().with_context(|| {
+            format!(
                 "dv.view(\"{relative}\"): file not found — mdq looks for \"{relative}.js\" \
                  or \"{relative}/view.js\" inside the vault"
-            ))?;
+            )
+        })?;
         if !canonical_path.starts_with(&canonical_vault) {
             bail!("dv.view path escapes vault: {}", canonical_path.display());
         }

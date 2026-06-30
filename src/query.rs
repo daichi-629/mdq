@@ -115,8 +115,12 @@ impl Predicate {
                 value.ends_with(suffix)
             }),
             Operator::Matches => pair(actual, self.expected.as_ref(), |actual, expected| {
-                let Some(pattern) = expected.as_str() else { return false; };
-                let Ok(re) = Regex::new(pattern) else { return false; };
+                let Some(pattern) = expected.as_str() else {
+                    return false;
+                };
+                let Ok(re) = Regex::new(pattern) else {
+                    return false;
+                };
                 match actual {
                     Value::String(s) => re.is_match(s),
                     Value::Array(items) => items

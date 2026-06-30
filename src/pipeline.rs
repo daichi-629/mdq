@@ -124,9 +124,7 @@ impl StageExecutor for FilterStage {
             .get(language_name)
             .with_context(|| format!("unknown query language: {language_name}"))?;
         let expression = language.parse(source)?;
-        let matched: Vec<NoteRef> = context
-            .database
-            .query_frontmatter(expression.as_ref())?;
+        let matched: Vec<NoteRef> = context.database.query_frontmatter(expression.as_ref())?;
         let matched_paths: HashSet<&str> = matched.iter().map(|n| n.path.as_str()).collect();
         let input_paths: HashSet<String> = input.iter().map(|h| h.path.clone()).collect();
         let mut hits: Vec<SearchHit> = input
@@ -271,11 +269,7 @@ mod tests {
         let directory = tempfile::tempdir().unwrap();
         let vault = directory.path().join("notes");
         fs::create_dir_all(&vault).unwrap();
-        fs::write(
-            vault.join("meta_only.md"),
-            "---\nkind: config\n---\n",
-        )
-        .unwrap();
+        fs::write(vault.join("meta_only.md"), "---\nkind: config\n---\n").unwrap();
         fs::write(
             vault.join("with_body.md"),
             "---\nkind: config\n---\n# Body\nsome content\n",
@@ -292,7 +286,10 @@ mod tests {
             )
             .unwrap();
         let paths: Vec<&str> = hits.iter().map(|h| h.path.as_str()).collect();
-        assert!(paths.contains(&"meta_only.md"), "frontmatter-only note must appear in filter output");
+        assert!(
+            paths.contains(&"meta_only.md"),
+            "frontmatter-only note must appear in filter output"
+        );
         assert!(paths.contains(&"with_body.md"));
     }
 

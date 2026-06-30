@@ -703,9 +703,9 @@ impl Database {
             return Ok(Some(path_ids[0]));
         }
         // Fall back to title / filename match (may be ambiguous).
-        let mut title_stmt = self.connection.prepare(
-            "SELECT id FROM notes WHERE lower(title) = ?1 LIMIT 2",
-        )?;
+        let mut title_stmt = self
+            .connection
+            .prepare("SELECT id FROM notes WHERE lower(title) = ?1 LIMIT 2")?;
         let title_ids = title_stmt
             .query_map([filename], |row| row.get(0))?
             .collect::<rusqlite::Result<Vec<i64>>>()?;
@@ -950,11 +950,7 @@ mod tests {
         let directory = tempfile::tempdir().unwrap();
         let vault = directory.path().join("notes");
         fs::create_dir_all(&vault).unwrap();
-        fs::write(
-            vault.join("meta_only.md"),
-            "---\nkind: reference\n---\n",
-        )
-        .unwrap();
+        fs::write(vault.join("meta_only.md"), "---\nkind: reference\n---\n").unwrap();
         fs::write(
             vault.join("with_body.md"),
             "---\nkind: reference\n---\n# Body\nsome content\n",
@@ -965,7 +961,11 @@ mod tests {
 
         let expression = Expression::parse("kind = reference").unwrap();
         let notes = database.query_frontmatter(&expression).unwrap();
-        assert_eq!(notes.len(), 2, "frontmatter-only note must be returned by query_frontmatter");
+        assert_eq!(
+            notes.len(),
+            2,
+            "frontmatter-only note must be returned by query_frontmatter"
+        );
         let paths: Vec<&str> = notes.iter().map(|n| n.path.as_str()).collect();
         assert!(paths.contains(&"meta_only.md"));
         assert!(paths.contains(&"with_body.md"));
@@ -999,6 +999,9 @@ mod tests {
         database.rebuild(&vault).unwrap();
 
         let result = database.note_body("nonexistent").unwrap();
-        assert!(result.is_none(), "note_body must return None for missing note");
+        assert!(
+            result.is_none(),
+            "note_body must return None for missing note"
+        );
     }
 }
