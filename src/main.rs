@@ -88,6 +88,17 @@ enum Command {
         /// Current note used by this.file and dv.current().
         #[arg(long)]
         current: Option<PathBuf>,
+        /// Tasks-only custom status mapping: SYMBOL=TYPE or SYMBOL=NAME:TYPE[:NEXT].
+        ///
+        /// Examples: --tasks-status '-=CANCELLED', --tasks-status '?=Needs Triage:ON_HOLD'
+        #[arg(long = "tasks-status")]
+        tasks_status: Vec<String>,
+        /// Tasks-only global filter string. Only checklist items containing this text are tasks.
+        #[arg(long = "tasks-global-filter")]
+        tasks_global_filter: Option<String>,
+        /// Tasks-only global query prepended to every Tasks query unless it says `ignore global query`.
+        #[arg(long = "tasks-global-query")]
+        tasks_global_query: Option<String>,
         #[arg(short, long, default_value_t = 100)]
         limit: usize,
     },
@@ -150,7 +161,6 @@ fn main() -> Result<()> {
     let db_path = cli.db.unwrap_or(default_db_path(&vault)?);
     let mut database = Database::open(&db_path)?;
     let pipeline = PipelineEngine::standard();
-    let compatibility = CompatibilityEngine::standard();
 
     let needs_fresh_index = !matches!(
         cli.command,
@@ -222,8 +232,17 @@ fn main() -> Result<()> {
             file,
             current,
             limit,
+            tasks_status,
+            tasks_global_filter,
+            tasks_global_query,
         } => {
             let language = language.to_ascii_lowercase();
+            let has_tasks_options = !tasks_status.is_empty()
+                || tasks_global_filter.is_some()
+                || tasks_global_query.is_some();
+            if has_tasks_options && language != "tasks" {
+                bail!("--tasks-* options can only be used with --language tasks");
+            }
             let source = match (expression, file) {
                 (Some(source), None) => source,
                 (None, Some(path)) => std::fs::read_to_string(&path)
@@ -242,37 +261,28 @@ fn main() -> Result<()> {
                 let total = notes.len();
                 notes.truncate(limit);
                 if total > limit {
-                    eprintln!("note: {total} results found, showing first {limit} (use --limit to adjust)");
+                    eprintln!(
+                        "note: {total} results found, showing first {limit} (use --limit to adjust)"
+                    );
                 }
                 output_notes(&notes, cli.json)?;
             } else {
                 let current_file = current
-                    .map(|path| {
-                        let resolved = if path.is_absolute() {
-                            path
-                        } else {
-                            vault.join(&path)
-                        };
-                        if !resolved.exists() {
-                            bail!(
-                                "--current path does not exist: {}",
-                                resolved.display()
-                            );
-                        }
-                        if !resolved.starts_with(&vault) {
-                            bail!(
-                                "--current path must be inside the vault ({}): {}",
-                                vault.display(),
-                                resolved.display()
-                            );
-                        }
-                        Ok(resolved)
-                    })
+                    .map(|path| resolve_current_file(&vault, path))
                     .transpose()?;
                 let context = QueryContext {
                     database: &database,
                     vault: &vault,
                     current_file,
+                };
+                let compatibility = if has_tasks_options {
+                    CompatibilityEngine::standard_with_tasks_settings(
+                        &tasks_status,
+                        tasks_global_filter,
+                        tasks_global_query,
+                    )?
+                } else {
+                    CompatibilityEngine::standard()
                 };
                 let mut result = compatibility.execute(&language, &context, &source)?;
                 let total = result.rows.len();
@@ -343,15 +353,20 @@ fn main() -> Result<()> {
             let mut hits = pipeline.execute(&database, &stages)?;
             let total = hits.len();
             if context {
-                let context = build_context(&database, hits, limit, max_chars.unwrap_or(usize::MAX))?;
+                let context =
+                    build_context(&database, hits, limit, max_chars.unwrap_or(usize::MAX))?;
                 if total > limit {
-                    eprintln!("note: {total} results found, showing first {limit} (use --limit to adjust)");
+                    eprintln!(
+                        "note: {total} results found, showing first {limit} (use --limit to adjust)"
+                    );
                 }
                 output_context(context, cli.json, verbose)?;
             } else {
                 hits.truncate(limit);
                 if total > limit {
-                    eprintln!("note: {total} results found, showing first {limit} (use --limit to adjust)");
+                    eprintln!(
+                        "note: {total} results found, showing first {limit} (use --limit to adjust)"
+                    );
                 }
                 output_hits(&hits, cli.json, verbose)?;
             }
@@ -547,7 +562,11 @@ fn build_context(
             break;
         }
         let header_len = hit.path.chars().count()
-            + hit.heading.as_deref().map(|h| 1 + h.chars().count()).unwrap_or(0);
+            + hit
+                .heading
+                .as_deref()
+                .map(|h| 1 + h.chars().count())
+                .unwrap_or(0);
         let text_budget = remaining.saturating_sub(header_len);
         if text_budget == 0 {
             continue;
@@ -577,6 +596,31 @@ fn run_alias(
     Ok(hits)
 }
 
+fn resolve_current_file(vault: &Path, path: PathBuf) -> Result<PathBuf> {
+    let resolved = if path.is_absolute() {
+        path
+    } else {
+        vault.join(&path)
+    };
+    if !resolved.exists() {
+        bail!("--current path does not exist: {}", resolved.display());
+    }
+    let canonical_vault = vault
+        .canonicalize()
+        .with_context(|| format!("cannot resolve vault path {}", vault.display()))?;
+    let canonical_current = resolved
+        .canonicalize()
+        .with_context(|| format!("cannot resolve --current path {}", resolved.display()))?;
+    if !canonical_current.starts_with(&canonical_vault) {
+        bail!(
+            "--current path must be inside the vault ({}): {}",
+            canonical_vault.display(),
+            canonical_current.display()
+        );
+    }
+    Ok(canonical_current)
+}
+
 fn output_context(context: Vec<ContextItem>, json: bool, verbose: bool) -> Result<()> {
     if json {
         return print_json(&context);
@@ -603,4 +647,22 @@ fn output_context(context: Vec<ContextItem>, json: bool, verbose: bool) -> Resul
 fn print_json<T: Serialize + ?Sized>(value: &T) -> Result<()> {
     println!("{}", serde_json::to_string_pretty(value)?);
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::fs;
+
+    #[test]
+    fn current_file_must_resolve_inside_vault() {
+        let directory = tempfile::tempdir().unwrap();
+        let vault = directory.path().join("vault");
+        fs::create_dir_all(&vault).unwrap();
+        fs::write(vault.join("inside.md"), "# Inside\n").unwrap();
+        fs::write(directory.path().join("outside.md"), "# Outside\n").unwrap();
+
+        assert!(resolve_current_file(&vault, PathBuf::from("inside.md")).is_ok());
+        assert!(resolve_current_file(&vault, PathBuf::from("../outside.md")).is_err());
+    }
 }

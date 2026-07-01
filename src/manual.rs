@@ -1,5 +1,7 @@
 use anyhow::{Result, bail};
 
+include!(concat!(env!("OUT_DIR"), "/tasks_manual.rs"));
+
 pub const TOPICS: &[&str] = &[
     "overview",
     "index",
@@ -22,8 +24,22 @@ pub const TOPICS: &[&str] = &[
 pub fn render(topic: Option<&str>) -> Result<String> {
     match topic {
         None | Some("all") => Ok([
-            OVERVIEW, INDEX, SEARCH, QUERY, BACKLINKS, LINKS, GRAPH, PIPELINE, STATUS, NATIVE,
-            TASKS, BASE, DATAVIEW, DATAVIEWJS, EXTENSIONS, EXAMPLES,
+            OVERVIEW,
+            INDEX,
+            SEARCH,
+            QUERY,
+            BACKLINKS,
+            LINKS,
+            GRAPH,
+            PIPELINE,
+            STATUS,
+            NATIVE,
+            GENERATED_TASKS_MANUAL,
+            BASE,
+            DATAVIEW,
+            DATAVIEWJS,
+            EXTENSIONS,
+            EXAMPLES,
         ]
         .join("\n\n")),
         Some("overview") => Ok(OVERVIEW.to_owned()),
@@ -36,7 +52,7 @@ pub fn render(topic: Option<&str>) -> Result<String> {
         Some("pipeline") => Ok(PIPELINE.to_owned()),
         Some("status") => Ok(STATUS.to_owned()),
         Some("native") => Ok(NATIVE.to_owned()),
-        Some("tasks") => Ok(TASKS.to_owned()),
+        Some("tasks") => Ok(GENERATED_TASKS_MANUAL.to_owned()),
         Some("base") => Ok(BASE.to_owned()),
         Some("dataview") | Some("dql") => Ok(DATAVIEW.to_owned()),
         Some("dataviewjs") | Some("dvjs") => Ok(DATAVIEWJS.to_owned()),
@@ -120,7 +136,8 @@ default, or `bm25:QUERY` / `rag:QUERY` with `--only`)."#;
 const QUERY: &str = r#"# query command
 
   mdq --vault PATH query [EXPRESSION] --language LANGUAGE
-    [--file PATH] [--current PATH] [--limit N]
+    [--file PATH] [--current PATH] [--tasks-status SPEC]
+    [--tasks-global-filter TEXT] [--tasks-global-query QUERY] [--limit N]
 
 Runs one of five query languages against the indexed vault:
   native (default)   see `mdq manual native`
@@ -133,6 +150,10 @@ Provide EXPRESSION inline, or `--file` for `.base` documents and longer
 scripts; inline source and `--file` are mutually exclusive. `--current` sets
 the note used by `this.file` (base) and `dv.current()` (dataviewjs).
 `--limit` truncates the result rows (default 100).
+For Tasks queries, repeat `--tasks-status` to define vault-independent status
+names and types: `SYMBOL=TYPE` or `SYMBOL=NAME:TYPE[:NEXT]`.
+Use `--tasks-global-filter` to require a marker string on task lines, and
+`--tasks-global-query` to prepend a default Tasks query.
 
 `native` queries return matching notes. Every other language returns
 structured RecordSet rows (see `mdq manual extensions`).
@@ -240,60 +261,6 @@ Examples:
   mdq query 'nested.key exists'
 
 This language is also available as `filter:` in retrieval pipelines."#;
-
-const TASKS: &str = r#"# Tasks-compatible query
-
-Input:
-  mdq query --language tasks 'not done
-  tags include #task
-  sort by due
-  limit 20'
-
-Task extraction:
-  - Reads Markdown checkbox list items: `- [ ]`, `- [x]`, `- [/]`, `- [-]`.
-  - Extracts every `[name:: value]` inline field generically.
-  - Extracts hashtags and source path/line.
-  - Built-in normalized fields are path, line, file, status, status_name,
-    status_type, status_symbol, done, completed, description, text, and tags.
-
-Filters:
-  done
-  not done
-  due|scheduled|starts|start|done|created
-      on|before|after|on or before|on or after DATE
-  tags include TEXT
-  tags do not include TEXT
-  path includes TEXT
-  path does not include TEXT
-  description includes TEXT
-  description does not include TEXT
-  status is NAME
-  (FILTER) OR (FILTER)
-  (FILTER) AND (FILTER)
-  filter by function JAVASCRIPT_BODY_OR_ARROW_FUNCTION
-
-Dates:
-  YYYY-MM-DD, today, tomorrow, yesterday
-
-Ordering and limits:
-  sort by FIELD
-  sort by FIELD reverse
-  sort by function JAVASCRIPT_BODY_OR_ARROW_FUNCTION
-  group by FIELD
-  group by function JAVASCRIPT_BODY_OR_ARROW_FUNCTION
-  limit NUMBER
-
-Accepted display-only directives:
-  hide task count, hide backlink, hide edit button, hide postpone button,
-  short mode
-
-JavaScript functions run in the restricted runtime described under
-`mdq manual dataviewjs`. Unsupported instructions are reported as diagnostics
-instead of silently changing task semantics. A trailing `\` joins the next
-line, matching Tasks multiline function-query style. Function bodies receive
-`task`, `query`, and `task.file.property(name)`.
-
-Empty query: an empty source string applies no filters and returns all tasks."#;
 
 const BASE: &str = r#"# Base-compatible query
 
@@ -537,3 +504,20 @@ Explore a note's link neighborhood before summarizing it:
 
 Check whether an index needs a manual rebuild before scripting against it:
   mdq status --json"##;
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn tasks_manual_is_generated_from_pest_doc_markers() {
+        let expected = include_str!("compat/tasks.pest")
+            .lines()
+            .filter_map(|line| line.trim_start().strip_prefix("// mdq-doc:"))
+            .map(str::trim_start)
+            .collect::<Vec<_>>()
+            .join("\n");
+
+        assert_eq!(render(Some("tasks")).unwrap(), expected);
+    }
+}

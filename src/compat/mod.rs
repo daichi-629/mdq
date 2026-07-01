@@ -173,11 +173,34 @@ impl CompatibilityEngine {
         let mut engine = Self {
             adapters: HashMap::new(),
         };
-        engine.register(Box::new(TasksAdapter));
+        engine.register(Box::new(TasksAdapter::new()));
         engine.register(Box::new(BaseAdapter));
         engine.register(Box::new(DataviewAdapter));
         engine.register(Box::new(DataviewJsAdapter));
         engine
+    }
+
+    pub fn standard_with_tasks_statuses(specs: &[String]) -> Result<Self> {
+        Self::standard_with_tasks_settings(specs, None, None)
+    }
+
+    pub fn standard_with_tasks_settings(
+        status_specs: &[String],
+        global_filter: Option<String>,
+        global_query: Option<String>,
+    ) -> Result<Self> {
+        let mut engine = Self {
+            adapters: HashMap::new(),
+        };
+        engine.register(Box::new(TasksAdapter::with_settings(
+            status_specs,
+            global_filter,
+            global_query,
+        )?));
+        engine.register(Box::new(BaseAdapter));
+        engine.register(Box::new(DataviewAdapter));
+        engine.register(Box::new(DataviewJsAdapter));
+        Ok(engine)
     }
 
     pub fn register(&mut self, adapter: Box<dyn QueryAdapter>) {

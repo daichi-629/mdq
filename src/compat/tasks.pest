@@ -1,0 +1,278 @@
+// mdq-doc: # Tasks-compatible query
+// mdq-doc:
+// mdq-doc: Input:
+// mdq-doc:   mdq query --language tasks 'not done
+// mdq-doc:   tags include #task
+// mdq-doc:   sort by due
+// mdq-doc:   limit 20'
+// mdq-doc:
+// mdq-doc: Task extraction:
+// mdq-doc:   - Reads Markdown checkbox list items using `-`, `*`, `+`, `1.`, or `1)`:
+// mdq-doc:     `[ ]`, `[x]`, `[X]`, `[/]`, and `[-]`.
+// mdq-doc:   - Extracts every `[name:: value]` inline field generically.
+// mdq-doc:   - Extracts Tasks emoji fields:
+// mdq-doc:       📅 due, ✅ done/completion, ⏳ scheduled, 🛫 start, ➕ created,
+// mdq-doc:       ❌ cancelled, 🔁 recurrence, 🆔 id, ⛔ depends_on,
+// mdq-doc:       🔺 highest, ⏫ high, 🔼 medium, 🔽 low, ⏬ lowest priority.
+// mdq-doc:   - Extracts hashtags and source path/line.
+// mdq-doc:   - Built-in normalized fields are path, line, file, status, status_name,
+// mdq-doc:     status_type, status_symbol, statusGroup, done, completed, isDone,
+// mdq-doc:     description, descriptionWithoutTags, text, originalMarkdown,
+// mdq-doc:     lineNumber, listMarker, heading, backlink, tags, due, scheduled,
+// mdq-doc:     start, happens, completion, created, cancelled, recurrence,
+// mdq-doc:     recurrenceRule, recurrenceGroup, isRecurring, recurringGroup,
+// mdq-doc:     onCompletion, priority, priorityName, priorityGroup,
+// mdq-doc:     priorityNameGroupText, priorityNumber, urgency, id,
+// mdq-doc:     depends_on, dependsOn, isBlocked, isBlocking, indentation,
+// mdq-doc:     isSubItem, parent, and outlinks.
+// mdq-doc:   - `file` contains path, pathWithoutExtension, filename,
+// mdq-doc:     filenameWithoutExtension, folder, root, frontmatter,
+// mdq-doc:     outlinksInProperties, outlinksInBody, and outlinks.
+// mdq-doc:
+// mdq-doc: Filters:
+// mdq-doc:   done
+// mdq-doc:   not done
+// mdq-doc:   due|scheduled|starts|start|done|created|cancelled|happens
+// mdq-doc:       [on|in|before|after|on or before|on or after|in or before|in or after] DATE
+// mdq-doc:   due|scheduled|starts|start|done|created|cancelled|happens DATE DATE
+// mdq-doc:   due|scheduled|starts|start|done|created|cancelled date is invalid
+// mdq-doc:   has due|done|scheduled|start|created|cancelled|happens date
+// mdq-doc:   no due|done|scheduled|start|created|cancelled|happens date
+// mdq-doc:   has tags
+// mdq-doc:   no tags
+// mdq-doc:   tags include TEXT
+// mdq-doc:   tags do not include TEXT
+// mdq-doc:   tag includes TEXT
+// mdq-doc:   tag does not include TEXT
+// mdq-doc:   tags regex matches /PATTERN/FLAGS
+// mdq-doc:   tags regex does not match /PATTERN/FLAGS
+// mdq-doc:   path|root|folder|filename|heading|description includes TEXT
+// mdq-doc:   path|root|folder|filename|heading|description does not include TEXT
+// mdq-doc:   path|root|folder|filename|heading|description regex matches /PATTERN/FLAGS
+// mdq-doc:   path|root|folder|filename|heading|description regex does not match /PATTERN/FLAGS
+// mdq-doc:   status.name includes TEXT
+// mdq-doc:   status.name does not include TEXT
+// mdq-doc:   status.name regex matches /PATTERN/FLAGS
+// mdq-doc:   status.name regex does not match /PATTERN/FLAGS
+// mdq-doc:   status.type is TODO|DONE|IN_PROGRESS|ON_HOLD|CANCELLED|NON_TASK
+// mdq-doc:   status.type is not TODO|DONE|IN_PROGRESS|ON_HOLD|CANCELLED|NON_TASK
+// mdq-doc:   status is NAME
+// mdq-doc:   priority is highest|high|medium|normal|low|lowest|none
+// mdq-doc:   priority is not PRIORITY
+// mdq-doc:   priority is above PRIORITY
+// mdq-doc:   priority is below PRIORITY
+// mdq-doc:   is recurring
+// mdq-doc:   is not recurring
+// mdq-doc:   recurrence includes TEXT
+// mdq-doc:   recurrence does not include TEXT
+// mdq-doc:   recurrence regex matches /PATTERN/FLAGS
+// mdq-doc:   recurrence regex does not match /PATTERN/FLAGS
+// mdq-doc:   has id
+// mdq-doc:   no id
+// mdq-doc:   id includes TEXT
+// mdq-doc:   id does not include TEXT
+// mdq-doc:   id regex matches /PATTERN/FLAGS
+// mdq-doc:   id regex does not match /PATTERN/FLAGS
+// mdq-doc:   has depends on
+// mdq-doc:   no depends on
+// mdq-doc:   is blocked
+// mdq-doc:   is not blocked
+// mdq-doc:   is blocking
+// mdq-doc:   is not blocking
+// mdq-doc:   exclude sub-items
+// mdq-doc:   NOT (FILTER)
+// mdq-doc:   (FILTER) OR (FILTER)
+// mdq-doc:   (FILTER) OR NOT (FILTER)
+// mdq-doc:   (FILTER) AND (FILTER)
+// mdq-doc:   (FILTER) AND NOT (FILTER)
+// mdq-doc:   (FILTER) XOR (FILTER)
+// mdq-doc:   filter by function JAVASCRIPT_BODY_OR_ARROW_FUNCTION
+// mdq-doc:
+// mdq-doc: Dates:
+// mdq-doc:   YYYY-MM-DD, flexible English dates parsed by `chrono-english`,
+// mdq-doc:   YYYY-Www, YYYY-MM, YYYY-Qq, YYYY, today, tomorrow, yesterday,
+// mdq-doc:   and last|this|next week|month|quarter|year.
+// mdq-doc:   A two-date form (`DATE DATE`) is treated as an inclusive range.
+// mdq-doc:   `starts before`, `starts on or before`, and `starts in or before`
+// mdq-doc:   include tasks with no start date, matching Obsidian Tasks.
+// mdq-doc:
+// mdq-doc: Ordering and limits:
+// mdq-doc:   sort by FIELD
+// mdq-doc:   sort by FIELD reverse
+// mdq-doc:   sort by tag [INDEX]
+// mdq-doc:   sort by urgency
+// mdq-doc:   sort by random
+// mdq-doc:   sort by function [reverse] JAVASCRIPT_BODY_OR_ARROW_FUNCTION
+// mdq-doc:   group by FIELD
+// mdq-doc:   group by FIELD reverse
+// mdq-doc:   group by function JAVASCRIPT_BODY_OR_ARROW_FUNCTION
+// mdq-doc:   limit NUMBER
+// mdq-doc:   limit to NUMBER tasks
+// mdq-doc:   limit groups NUMBER
+// mdq-doc:   limit groups to NUMBER tasks
+// mdq-doc:
+// mdq-doc: Common sort/group fields:
+// mdq-doc:   status, status.type, status.name, due, scheduled, start, happens,
+// mdq-doc:   completion, created, cancelled, description, descriptionWithoutTags,
+// mdq-doc:   priority, priorityName, priorityNumber, urgency, recurring,
+// mdq-doc:   recurrence, tag, tags, id, path, file.path, file.root,
+// mdq-doc:   file.folder, file.filename, filename, backlink, heading,
+// mdq-doc:   originalMarkdown, lineNumber.
+// mdq-doc:
+// mdq-doc: CLI status overrides:
+// mdq-doc:   Repeat `--tasks-status SPEC` on `mdq query --language tasks` to define
+// mdq-doc:   vault-independent custom status names and types. SPEC is `SYMBOL=TYPE`
+// mdq-doc:   or `SYMBOL=NAME:TYPE[:NEXT]`; TYPE is TODO, DONE, IN_PROGRESS,
+// mdq-doc:   ON_HOLD, CANCELLED, NON_TASK, or EMPTY. Examples:
+// mdq-doc:   `--tasks-status '-=CANCELLED'`
+// mdq-doc:   `--tasks-status '?=Needs Triage:ON_HOLD'`
+// mdq-doc: Use `--tasks-global-filter TEXT` to make only checklist items
+// mdq-doc: containing TEXT count as tasks. Pass `--tasks-global-query QUERY`
+// mdq-doc: to prepend QUERY to every Tasks query; a query line `ignore global query`
+// mdq-doc: disables that prepend for that query.
+// mdq-doc: The Tasks setting "Remove global filter from description" is not
+// mdq-doc: supported; mdq intentionally leaves the marker text in descriptions.
+// mdq-doc:
+// mdq-doc: Placeholders:
+// mdq-doc:   {{query.file.path}}
+// mdq-doc:   {{query.file.pathWithoutExtension}}
+// mdq-doc:   {{query.file.filename}}
+// mdq-doc:   {{query.file.filenameWithoutExtension}}
+// mdq-doc:   {{query.file.folder}}
+// mdq-doc:   {{query.file.root}}
+// mdq-doc:
+// mdq-doc: Accepted display-only directives:
+// mdq-doc:   hide ..., show ..., short mode, full mode, explain.
+// mdq-doc:   These are accepted for saved-query compatibility and ignored by the CLI renderer.
+// mdq-doc:
+// mdq-doc: JavaScript functions run in the restricted runtime described under
+// mdq-doc: `mdq manual dataviewjs`. Unsupported instructions are reported as diagnostics
+// mdq-doc: instead of silently changing task semantics. A trailing `\` joins the next
+// mdq-doc: line, matching Tasks multiline function-query style. Function bodies receive
+// mdq-doc: `task`, `query`, `moment()`, `task.file.property(name)`,
+// mdq-doc: `task.file.hasProperty(name)`, `task.isBlocked()`, and `task.isBlocking()`.
+// mdq-doc: `task.findClosestParentTask()` returns the nearest preceding less-indented task,
+// mdq-doc: or `null` when there is no parent task.
+// mdq-doc: Date fields expose TasksDate-style helpers: `formatAsDate()`,
+// mdq-doc: `formatAsDateAndTime()`, `format(pattern[, fallback])`,
+// mdq-doc: `toISOString([keepOffset])`, `category`, `fromNow`, and a small
+// mdq-doc: `moment` facade with `isValid`, `isSame`, `isSameOrBefore`,
+// mdq-doc: `isSameOrAfter`, and `format`.
+// mdq-doc: Link fields expose objects with `destinationPath`.
+// mdq-doc:
+// mdq-doc: Compatibility limits:
+// mdq-doc:   - The CLI reads Markdown task lines and returns structured rows; it does not
+// mdq-doc:     render or mutate tasks in Obsidian.
+// mdq-doc:   - Obsidian UI rendering is intentionally not implemented, because it
+// mdq-doc:     does not apply to this CLI. Vault settings are not read automatically;
+// mdq-doc:     pass global query/filter and status meanings explicitly with CLI options.
+// mdq-doc:   - Arbitrary status symbols such as `?` or `P` are preserved. Without
+// mdq-doc:     vault-specific Tasks settings, unknown symbols expose status name `Unknown`,
+// mdq-doc:     type `TODO`, and next symbol `x`, matching Tasks' unknown-status fallback.
+// mdq-doc:   - "Remove global filter from description" is not implemented.
+// mdq-doc:
+// mdq-doc: Empty query: an empty source string applies no filters and returns all tasks.
+
+SPACE = _{ " " | "\t" }
+NEWLINE = _{ "\r\n" | "\n" }
+
+line = { SOI ~ instruction? ~ comment? ~ EOI }
+instruction = {
+    function_filter
+  | function_sort
+  | function_group
+  | group
+  | sort
+  | limit
+  | ignore_global_query
+  | display
+  | boolean_expr
+}
+
+function_filter = { "filter" ~ SPACE+ ~ "by" ~ SPACE+ ~ "function" ~ SPACE+ ~ js_source }
+function_sort = { "sort" ~ SPACE+ ~ "by" ~ SPACE+ ~ "function" ~ SPACE+ ~ function_reverse? ~ js_source }
+function_group = { "group" ~ SPACE+ ~ "by" ~ SPACE+ ~ "function" ~ SPACE+ ~ js_source }
+group = { "group" ~ SPACE+ ~ "by" ~ SPACE+ ~ field_spec ~ reverse? }
+sort = { "sort" ~ SPACE+ ~ "by" ~ SPACE+ ~ field_spec ~ reverse? }
+limit = { "limit" ~ SPACE+ ~ (group_limit | total_limit) }
+total_limit = { ("to" ~ SPACE+)? ~ int ~ (SPACE+ ~ "tasks")? }
+group_limit = { "groups" ~ SPACE+ ~ ("to" ~ SPACE+)? ~ int ~ (SPACE+ ~ "tasks")? }
+display = { display_keyword ~ (SPACE+ ~ display_rest)? }
+ignore_global_query = { "ignore" ~ SPACE+ ~ "global" ~ SPACE+ ~ "query" }
+reverse = { SPACE+ ~ "reverse" }
+function_reverse = { "reverse" ~ SPACE+ }
+
+boolean_expr = { xor_expr }
+xor_expr = { or_expr ~ (XOR ~ or_expr)* }
+or_expr = { and_expr ~ ((OR | OR_NOT) ~ and_expr)* }
+and_expr = { unary_expr ~ ((AND | AND_NOT) ~ unary_expr)* }
+unary_expr = { NOT* ~ filter_primary }
+filter_primary = { "(" ~ boolean_expr ~ ")" | primitive_filter }
+
+primitive_filter = {
+    date_invalid_filter
+  | date_presence_filter
+  | date_filter
+  | done_filter
+  | state_filter
+  | field_presence_filter
+  | priority_filter
+  | regex_filter
+  | text_filter
+  | status_filter
+  | exclude_sub_items
+}
+
+done_filter = { "not" ~ SPACE+ ~ "done" | "done" }
+date_filter = { date_field ~ SPACE+ ~ (date_relation ~ SPACE+)? ~ date_spec }
+date_invalid_filter = { date_field_name ~ SPACE+ ~ "date" ~ SPACE+ ~ "is" ~ SPACE+ ~ "invalid" }
+date_presence_filter = { presence ~ SPACE+ ~ date_field_name ~ SPACE+ ~ "date" }
+field_presence_filter = { presence ~ SPACE+ ~ field_presence_name }
+state_filter = { "is" ~ SPACE+ ~ ("not" ~ SPACE+)? ~ state_name }
+priority_filter = { "priority" ~ SPACE+ ~ "is" ~ SPACE+ ~ priority_relation? ~ priority_name }
+regex_filter = { text_field ~ SPACE+ ~ "regex" ~ SPACE+ ~ regex_relation ~ SPACE+ ~ regex }
+text_filter = { text_field ~ SPACE+ ~ text_relation ~ SPACE+ ~ text_value }
+status_filter = { status_field ~ SPACE+ ~ status_relation ~ SPACE+ ~ status_value }
+exclude_sub_items = { "exclude" ~ SPACE+ ~ "sub-items" }
+
+date_field = { "due" | "scheduled" | "starts" | "start" | "done" | "created" | "cancelled" | "happens" }
+date_field_name = { "due" | "scheduled" | "starts" | "start" | "done" | "created" | "cancelled" | "happens" }
+date_relation = { "in" ~ SPACE+ ~ "or" ~ SPACE+ ~ "before" | "in" ~ SPACE+ ~ "or" ~ SPACE+ ~ "after" | "on" ~ SPACE+ ~ "or" ~ SPACE+ ~ "before" | "on" ~ SPACE+ ~ "or" ~ SPACE+ ~ "after" | "before" | "after" | "in" | "on" }
+date_spec = @{ date_range | date_atom }
+date_range = { date_atom ~ SPACE+ ~ date_atom }
+date_atom = { iso_date | iso_week | iso_month | iso_quarter | iso_year | relative_date }
+
+presence = { "has" | "no" }
+field_presence_name = { "tags" | "id" | "depends" ~ SPACE+ ~ "on" | "recurring" | "blocking" | "blocked" }
+state_name = { "recurring" | "blocking" | "blocked" }
+priority_relation = { "not" ~ SPACE+ | "above" ~ SPACE+ | "below" ~ SPACE+ }
+priority_name = { "highest" | "high" | "medium" | "normal" | "low" | "lowest" | "none" }
+regex_relation = { "matches" | "does" ~ SPACE+ ~ "not" ~ SPACE+ ~ "match" }
+text_relation = { "includes" | "include" | "does" ~ SPACE+ ~ "not" ~ SPACE+ ~ "include" | "do" ~ SPACE+ ~ "not" ~ SPACE+ ~ "include" }
+status_relation = { "is" ~ SPACE+ ~ "not" | "is" | "includes" | "does" ~ SPACE+ ~ "not" ~ SPACE+ ~ "include" }
+text_field = { "tags" | "tag" | "path" | "root" | "folder" | "filename" | "heading" | "descriptionWithoutTags" | "description" | "recurrence" | "onCompletion" | "id" | "status.name" }
+status_field = { "status.type" | "status.name" | "status" }
+
+display_keyword = { "hide" | "show" | "short" | "full" | "explain" }
+display_rest = @{ (!EOI ~ ANY)+ }
+field_spec = @{ field_path ~ (SPACE+ ~ int)? }
+field_path = @{ (ASCII_ALPHANUMERIC | "_" | "-" | "." | "#")+ }
+int = @{ ASCII_DIGIT+ }
+iso_date = @{ ASCII_DIGIT{4} ~ "-" ~ ASCII_DIGIT{2} ~ "-" ~ ASCII_DIGIT{2} }
+iso_week = @{ ASCII_DIGIT{4} ~ "-W" ~ ASCII_DIGIT{2} }
+iso_month = @{ ASCII_DIGIT{4} ~ "-" ~ ASCII_DIGIT{2} }
+iso_quarter = @{ ASCII_DIGIT{4} ~ "-Q" ~ ASCII_DIGIT }
+iso_year = @{ ASCII_DIGIT{4} }
+relative_date = @{ (ASCII_ALPHANUMERIC | "_" | "-" | "," | "/" | ".")+ ~ (SPACE+ ~ (ASCII_ALPHANUMERIC | "_" | "-" | "," | "/" | ".")+)* }
+regex = @{ "/" ~ (("\\" ~ ANY) | !("/" | NEWLINE) ~ ANY)+ ~ "/" ~ ASCII_ALPHA* }
+text_value = @{ (!(")" | EOI) ~ ANY)+ }
+status_value = @{ (!(")" | EOI) ~ ANY)+ }
+js_source = @{ (!EOI ~ ANY)+ }
+comment = _{ SPACE* ~ "{{!" ~ (!"}}" ~ ANY)* ~ "}}" }
+
+XOR = { SPACE+ ~ "XOR" ~ SPACE+ }
+OR = { SPACE+ ~ "OR" ~ SPACE+ }
+AND = { SPACE+ ~ "AND" ~ SPACE+ }
+AND_NOT = { SPACE+ ~ "AND" ~ SPACE+ ~ "NOT" ~ SPACE+ }
+OR_NOT = { SPACE+ ~ "OR" ~ SPACE+ ~ "NOT" ~ SPACE+ }
+NOT = { "NOT" ~ SPACE+ }

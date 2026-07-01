@@ -13,7 +13,10 @@ use crate::model::{ParsedChunk, ParsedLink, ParsedNote};
 
 pub fn parse_note(vault: &Path, path: &Path) -> Result<ParsedNote> {
     let bytes = fs::read(path).with_context(|| format!("failed to read {}", path.display()))?;
-    let text = String::from_utf8_lossy(&bytes).replace("\r\n", "\n");
+    let text = std::str::from_utf8(&bytes)
+        .with_context(|| format!("{} is not valid UTF-8", path.display()))?
+        .to_owned()
+        .replace("\r\n", "\n");
     let metadata = fs::metadata(path)?;
     let mtime = metadata
         .modified()
@@ -132,7 +135,7 @@ fn push_section(chunks: &mut Vec<ParsedChunk>, heading: Option<String>, text: &s
     }
 }
 
-fn extract_links(body: &str) -> Vec<ParsedLink> {
+pub fn extract_links(body: &str) -> Vec<ParsedLink> {
     let wiki_re = Regex::new(r"(!)?\[\[([^\[\]]+)\]\]").unwrap();
     let mut links: Vec<ParsedLink> = wiki_re
         .captures_iter(body)
@@ -259,5 +262,18 @@ mod tests {
     fn extracts_inline_tags_without_headings() {
         let tags = extract_tags("# Heading\nText #project/alpha and #work.");
         assert_eq!(tags, vec!["project/alpha", "work"]);
+    }
+
+    #[test]
+    fn rejects_non_utf8_markdown_instead_of_lossy_indexing() {
+        let directory = tempfile::tempdir().unwrap();
+        let vault = directory.path().join("vault");
+        fs::create_dir_all(&vault).unwrap();
+        let note = vault.join("latin1.md");
+        fs::write(&note, b"# Latin1\n- [ ] Caf\xe9\n").unwrap();
+
+        let error = parse_note(&vault, &note).unwrap_err();
+
+        assert!(error.to_string().contains("is not valid UTF-8"));
     }
 }
