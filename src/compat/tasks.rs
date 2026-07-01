@@ -116,8 +116,9 @@ impl QueryAdapter for TasksAdapter {
                     })
             })
         });
+        let has_filter_matches = !tasks.is_empty();
         let mut sort_diagnostics = Vec::new();
-        for sort in &query.sorts {
+        for sort in query.sorts.iter().take(query.user_sort_count) {
             if let TaskSort::Field(field, _) = sort {
                 if !tasks.is_empty() && tasks.iter().all(|t| value_at_path(t, field).is_none()) {
                     sort_diagnostics.push(format!(
@@ -133,9 +134,8 @@ impl QueryAdapter for TasksAdapter {
         }
         let mut query_diagnostics = query.diagnostics;
         if query.group_limit.is_some() && query.groups.is_empty() {
-            query_diagnostics.push(
-                "limit groups has no effect without a group by instruction".to_owned(),
-            );
+            query_diagnostics
+                .push("limit groups has no effect without a group by instruction".to_owned());
         }
         let rows = if query.groups.is_empty() {
             tasks
@@ -153,9 +153,11 @@ impl QueryAdapter for TasksAdapter {
         };
         let mut result = RecordSet::new("tasks", rows);
         result.diagnostics = query_diagnostics;
-        result
-            .diagnostics
-            .extend(unique_strings(filter_diagnostics));
+        if !has_filter_matches {
+            result
+                .diagnostics
+                .extend(unique_strings(filter_diagnostics));
+        }
         result.diagnostics.extend(sort_diagnostics);
         Ok(result)
     }
@@ -178,6 +180,7 @@ fn collect_tasks_with_settings(
         let mut heading: Option<String> = None;
         let mut task_stack: Vec<(usize, Value)> = Vec::new();
         for (line_index, line) in page.body.lines().enumerate() {
+            let source_line = page.body_start_line + line_index;
             let task_line = strip_blockquote_prefix(line);
             if let Some(captures) = HEADING.captures(task_line) {
                 heading = Some(captures[1].to_owned());
@@ -201,9 +204,10 @@ fn collect_tasks_with_settings(
             let parent = task_stack.last().map(|(_, task)| task);
             let task = task_row(
                 &page.path,
-                line_index + 1,
+                source_line,
                 &captures[3],
                 task_source,
+                global_filter,
                 &page.metadata,
                 heading.as_deref(),
                 &captures[1],
@@ -224,6 +228,7 @@ fn collect_tasks_with_settings(
 struct TaskQuery {
     filters: Vec<TaskFilter>,
     sorts: Vec<TaskSort>,
+    user_sort_count: usize,
     groups: Vec<TaskGroup>,
     limit: Option<usize>,
     group_limit: Option<usize>,
@@ -466,6 +471,7 @@ impl TaskQuery {
         let mut query = Self {
             filters: Vec::new(),
             sorts: Vec::new(),
+            user_sort_count: 0,
             groups: Vec::new(),
             limit: None,
             group_limit: None,
@@ -498,6 +504,7 @@ impl TaskQuery {
                 }
             }
         }
+        query.user_sort_count = query.sorts.len();
         query.sorts.extend(default_tasks_sorts());
         Ok(query)
     }
@@ -2123,6 +2130,7 @@ fn task_row(
     line: usize,
     status: &str,
     source: &str,
+    global_filter: Option<&str>,
     frontmatter: &Value,
     heading: Option<&str>,
     indentation: &str,
@@ -2135,6 +2143,9 @@ fn task_row(
 ) -> Value {
     let mut fields = Map::new();
     let mut description = source.to_owned();
+    if let Some(filter) = global_filter {
+        description = description.replace(filter, "");
+    }
     for captures in INLINE_FIELD.captures_iter(source) {
         let key = captures[1].trim().to_ascii_lowercase();
         let value = captures[2].trim();
@@ -2426,6 +2437,7 @@ mod tests {
             7,
             " ",
             "#task write [due:: 2026-06-14] [priority:: high]",
+            None,
             &json!({}),
             Some("Tasks"),
             "",

@@ -35,6 +35,7 @@ impl Database {
                 path TEXT NOT NULL UNIQUE,
                 title TEXT NOT NULL,
                 body TEXT NOT NULL,
+                body_start_line INTEGER NOT NULL DEFAULT 1,
                 frontmatter_json TEXT,
                 mtime INTEGER NOT NULL,
                 ctime INTEGER NOT NULL DEFAULT 0,
@@ -89,6 +90,12 @@ impl Database {
             "TEXT NOT NULL DEFAULT ''",
         )?;
         ensure_column(&connection, "notes", "ctime", "INTEGER NOT NULL DEFAULT 0")?;
+        ensure_column(
+            &connection,
+            "notes",
+            "body_start_line",
+            "INTEGER NOT NULL DEFAULT 1",
+        )?;
         Ok(Self { connection })
     }
 
@@ -123,12 +130,13 @@ impl Database {
         for file in &files {
             let note = parse_note(vault, file)?;
             transaction.execute(
-                "INSERT INTO notes(path, title, body, frontmatter_json, mtime, ctime, size, content_hash)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+                "INSERT INTO notes(path, title, body, body_start_line, frontmatter_json, mtime, ctime, size, content_hash)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
                 params![
                     note.path,
                     note.title,
                     note.body,
+                    note.body_start_line as i64,
                     note.frontmatter.as_ref().map(serde_json::Value::to_string),
                     note.mtime,
                     note.ctime,
@@ -391,24 +399,25 @@ impl Database {
     pub fn all_pages(&self) -> Result<Vec<PageRecord>> {
         let mut statement = self.connection.prepare(
             "
-            SELECT path, title, body, frontmatter_json, mtime, ctime, size
+            SELECT path, title, body, body_start_line, frontmatter_json, mtime, ctime, size
             FROM notes
             ORDER BY path
             ",
         )?;
         let rows = statement.query_map([], |row| {
             let metadata = row
-                .get::<_, Option<String>>(3)?
+                .get::<_, Option<String>>(4)?
                 .and_then(|json| serde_json::from_str(&json).ok())
                 .unwrap_or_else(|| serde_json::Value::Object(Default::default()));
             Ok(PageRecord {
                 path: row.get(0)?,
                 title: row.get(1)?,
                 body: row.get(2)?,
+                body_start_line: row.get::<_, i64>(3)? as usize,
                 metadata,
-                mtime: row.get(4)?,
-                ctime: row.get(5)?,
-                size: row.get::<_, i64>(6)? as u64,
+                mtime: row.get(5)?,
+                ctime: row.get(6)?,
+                size: row.get::<_, i64>(7)? as u64,
             })
         })?;
         rows.collect::<rusqlite::Result<Vec<_>>>()

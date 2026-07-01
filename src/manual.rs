@@ -149,7 +149,9 @@ Runs one of five query languages against the indexed vault:
 Provide EXPRESSION inline, or `--file` for `.base` documents and longer
 scripts; inline source and `--file` are mutually exclusive. `--current` sets
 the note used by `this.file` (base) and `dv.current()` (dataviewjs).
-`--limit` truncates the result rows (default 100).
+`--limit` truncates the result rows (default 100). For Tasks queries this is
+an additional CLI limit applied after any `limit` instruction inside the Tasks
+query; if it truncates rows, mdq reports that in diagnostics.
 For Tasks queries, repeat `--tasks-status` to define vault-independent status
 names and types: `SYMBOL=TYPE` or `SYMBOL=NAME:TYPE[:NEXT]`.
 Use `--tasks-global-filter` to require a marker string on task lines, and

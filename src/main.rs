@@ -288,9 +288,15 @@ fn main() -> Result<()> {
                 let total = result.rows.len();
                 result.rows.truncate(limit);
                 if total > limit {
-                    let msg = format!(
-                        "{total} results found, showing first {limit} (use --limit to adjust)"
-                    );
+                    let msg = if language == "tasks" {
+                        format!(
+                            "Tasks query produced {total} rows after Tasks query limits; CLI --limit is additionally showing first {limit} rows"
+                        )
+                    } else {
+                        format!(
+                            "{total} results found, showing first {limit} (use --limit to adjust)"
+                        )
+                    };
                     result.diagnostics.push(msg.clone());
                     if !cli.json {
                         eprintln!("note: {msg}");

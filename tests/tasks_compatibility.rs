@@ -138,6 +138,8 @@ fn tasks_extracts_checkbox_markers_emoji_fields_inline_fields_and_file_propertie
     assert_eq!(row["priorityNumber"].as_i64().unwrap(), 0);
     assert_eq!(row["id"], "alpha");
     assert_eq!(row["heading"], "Plan");
+    assert_eq!(row["line"], 10);
+    assert_eq!(row["lineNumber"], 9);
     assert_eq!(row["file"]["path"], "Work/Projects/alpha.md");
     assert_eq!(row["file"]["folder"], "Work/Projects/");
     assert_eq!(row["file"]["root"], "Work/");
@@ -415,8 +417,10 @@ fn tasks_accepts_cli_supplied_global_filter_and_global_query() {
     let global_filter = run_tasks_with_settings(&ctx, "", &[], Some("#task"), None);
     assert_eq!(
         descriptions(&global_filter.rows),
-        vec!["#task Work item", "#task Done item"]
+        vec!["Work item", "Done item"]
     );
+    assert_eq!(global_filter.rows[0]["descriptionWithoutTags"], "Work item");
+    assert_eq!(global_filter.rows[0]["tags"].as_array().unwrap().len(), 0);
 
     let global_query = run_tasks_with_settings(&ctx, "not done", &[], None, Some("has due date"));
     assert_eq!(
@@ -442,6 +446,33 @@ fn tasks_accepts_cli_supplied_global_filter_and_global_query() {
         descriptions(&global_query_comment.rows),
         vec!["Personal item", "#task Work item"]
     );
+}
+
+#[test]
+fn tasks_does_not_warn_for_missing_default_sort_fields() {
+    let (dir, db) = fixture();
+    let vault = dir.path().join("vault");
+    let ctx = context(&db, &vault, None);
+
+    let result = run_tasks(&ctx, "description includes cancel alpha");
+
+    assert_eq!(descriptions(&result.rows), vec!["#task Cancel alpha"]);
+    assert!(result.diagnostics.is_empty());
+}
+
+#[test]
+fn tasks_keeps_successful_function_filter_results_clean_when_some_rows_error() {
+    let (dir, db) = fixture();
+    let vault = dir.path().join("vault");
+    let ctx = context(&db, &vault, None);
+
+    let result = run_tasks(
+        &ctx,
+        "filter by function task.file.property('sample_list').includes('Alpha')",
+    );
+
+    assert_eq!(result.rows.len(), 6);
+    assert!(result.diagnostics.is_empty());
 }
 
 // ---------------------------------------------------------------------------

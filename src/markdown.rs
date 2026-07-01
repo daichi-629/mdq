@@ -41,7 +41,7 @@ pub fn parse_note(vault: &Path, path: &Path) -> Result<ParsedNote> {
         .and_then(|value| value.to_str())
         .unwrap_or_default()
         .to_owned();
-    let (frontmatter, body) = split_frontmatter(&text);
+    let (frontmatter, body, body_start_line) = split_frontmatter(&text);
     let link_source = frontmatter
         .as_ref()
         .map(|value| format!("{body}\n{}", value))
@@ -54,6 +54,7 @@ pub fn parse_note(vault: &Path, path: &Path) -> Result<ParsedNote> {
         chunks: split_chunks(body),
         links: extract_links(&link_source),
         body: body.to_owned(),
+        body_start_line,
         mtime,
         ctime,
         size: metadata.len(),
@@ -61,19 +62,25 @@ pub fn parse_note(vault: &Path, path: &Path) -> Result<ParsedNote> {
     })
 }
 
-fn split_frontmatter(text: &str) -> (Option<serde_json::Value>, &str) {
+fn split_frontmatter(text: &str) -> (Option<serde_json::Value>, &str, usize) {
     let Some(rest) = text.strip_prefix("---\n") else {
-        return (None, text);
+        return (None, text, 1);
     };
     let Some(end) = rest.find("\n---\n") else {
-        return (None, text);
+        return (None, text, 1);
     };
     let yaml = &rest[..end];
     let body = &rest[end + 5..];
+    let body_start_index = text.len() - body.len();
+    let body_start_line = text[..body_start_index]
+        .bytes()
+        .filter(|byte| *byte == b'\n')
+        .count()
+        + 1;
     let value = serde_yaml::from_str::<serde_yaml::Value>(yaml)
         .ok()
         .and_then(|value| serde_json::to_value(value).ok());
-    (value, body)
+    (value, body, body_start_line)
 }
 
 fn split_chunks(body: &str) -> Vec<ParsedChunk> {
@@ -231,11 +238,12 @@ mod tests {
     #[test]
     fn parses_arbitrary_frontmatter() {
         let text = "---\ncustom:\n  nested: 42\n旗: true\n---\n# Body\nText";
-        let (frontmatter, body) = split_frontmatter(text);
+        let (frontmatter, body, body_start_line) = split_frontmatter(text);
         let value = frontmatter.unwrap();
         assert_eq!(value["custom"]["nested"], 42);
         assert_eq!(value["旗"], true);
         assert!(body.contains("# Body"));
+        assert_eq!(body_start_line, 6);
     }
 
     #[test]

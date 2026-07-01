@@ -127,11 +127,11 @@
 // mdq-doc:   `--tasks-status '-=CANCELLED'`
 // mdq-doc:   `--tasks-status '?=Needs Triage:ON_HOLD'`
 // mdq-doc: Use `--tasks-global-filter TEXT` to make only checklist items
-// mdq-doc: containing TEXT count as tasks. Pass `--tasks-global-query QUERY`
-// mdq-doc: to prepend QUERY to every Tasks query; a query line `ignore global query`
-// mdq-doc: disables that prepend for that query.
-// mdq-doc: The Tasks setting "Remove global filter from description" is not
-// mdq-doc: supported; mdq intentionally leaves the marker text in descriptions.
+// mdq-doc: containing TEXT count as tasks. The marker is removed from the task
+// mdq-doc: description and tag extraction, matching Tasks' description/tag
+// mdq-doc: searches. Pass `--tasks-global-query QUERY` to prepend QUERY to
+// mdq-doc: every Tasks query; a query line `ignore global query` disables that
+// mdq-doc: prepend for that query.
 // mdq-doc:
 // mdq-doc: Placeholders:
 // mdq-doc:   {{query.file.path}}
@@ -169,7 +169,10 @@
 // mdq-doc:   - Arbitrary status symbols such as `?` or `P` are preserved. Without
 // mdq-doc:     vault-specific Tasks settings, unknown symbols expose status name `Unknown`,
 // mdq-doc:     type `TODO`, and next symbol `x`, matching Tasks' unknown-status fallback.
-// mdq-doc:   - "Remove global filter from description" is not implemented.
+// mdq-doc:   - A Tasks query `limit` instruction is applied inside the Tasks
+// mdq-doc:     adapter. The CLI `query --limit` is a separate output cap applied
+// mdq-doc:     afterwards, and mdq reports a diagnostic when that cap truncates
+// mdq-doc:     Tasks rows.
 // mdq-doc:
 // mdq-doc: Empty query: an empty source string applies no filters and returns all tasks.
 
