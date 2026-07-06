@@ -106,6 +106,8 @@ enum Command {
     Backlinks { note: String },
     /// List links from a note.
     Links { note: String },
+    /// List links that do not resolve to a vault note or file.
+    UnresolvedLinks,
     /// Traverse resolved links in both directions.
     Graph {
         note: String,
@@ -134,9 +136,9 @@ enum Command {
     /// Show the per-command manual, query language reference, and examples.
     #[command(alias = "man")]
     Manual {
-        /// Topic: overview, index, search, query, backlinks, links, graph,
-        /// pipeline, status, native, tasks, base, dataview, dataviewjs,
-        /// extensions, examples, all.
+        /// Topic: overview, index, search, query, backlinks, links,
+        /// unresolved-links, graph, pipeline, status, native, tasks, base,
+        /// dataview, dataviewjs, extensions, examples, all.
         topic: Option<String>,
     },
 }
@@ -331,6 +333,16 @@ fn main() -> Result<()> {
                         .resolved_path
                         .unwrap_or_else(|| "<unresolved>".to_owned());
                     println!("{}\t{}\t{}", link.raw_target, resolved, link.embed);
+                }
+            }
+        }
+        Command::UnresolvedLinks => {
+            let links = database.unresolved_links()?;
+            if cli.json {
+                print_json(&links)?;
+            } else {
+                for link in links {
+                    println!("{}\t{}\t{}", link.source.path, link.raw_target, link.embed);
                 }
             }
         }

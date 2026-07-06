@@ -479,6 +479,14 @@ impl Database {
         )
     }
 
+    pub fn unresolved_links(&self) -> Result<Vec<LinkRef>> {
+        Ok(self
+            .all_links()?
+            .into_iter()
+            .filter(|link| link.resolved_path.is_none())
+            .collect())
+    }
+
     fn link_query(&self, sql: &str, note_id: i64) -> Result<Vec<LinkRef>> {
         let file_index = self.non_note_file_index()?;
         let mut statement = self.connection.prepare(sql)?;
@@ -1123,6 +1131,11 @@ mod tests {
         assert!(resolved.contains(&Some("views/open.base".to_owned())));
         assert!(resolved.contains(&Some("assets/logo.png".to_owned())));
         assert!(resolved.contains(&None));
+
+        let unresolved = database.unresolved_links().unwrap();
+        assert_eq!(unresolved.len(), 1);
+        assert_eq!(unresolved[0].source.path, "index.md");
+        assert_eq!(unresolved[0].raw_target, "missing.pdf");
     }
 
     #[test]

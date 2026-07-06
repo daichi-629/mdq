@@ -9,6 +9,7 @@ pub const TOPICS: &[&str] = &[
     "query",
     "backlinks",
     "links",
+    "unresolved-links",
     "graph",
     "pipeline",
     "status",
@@ -32,6 +33,7 @@ pub fn render(topic: Option<&str>) -> Result<String> {
             QUERY,
             BACKLINKS,
             LINKS,
+            UNRESOLVED_LINKS,
             GRAPH,
             PIPELINE,
             STATUS,
@@ -50,6 +52,7 @@ pub fn render(topic: Option<&str>) -> Result<String> {
         Some("query") => Ok(QUERY.to_owned()),
         Some("backlinks") => Ok(BACKLINKS.to_owned()),
         Some("links") => Ok(LINKS.to_owned()),
+        Some("unresolved-links") | Some("unresolved") => Ok(UNRESOLVED_LINKS.to_owned()),
         Some("graph") => Ok(GRAPH.to_owned()),
         Some("pipeline") => Ok(PIPELINE.to_owned()),
         Some("status") => Ok(STATUS.to_owned()),
@@ -83,6 +86,8 @@ Commands (see `mdq manual COMMAND` for each):
   query        native, Tasks, Base, Dataview, or DataviewJS query
   backlinks    notes linking to a note
   links        links from a note
+  unresolved-links
+               links that do not resolve to a vault note or file
   graph        traverse resolved links in both directions
   pipeline     run filters and rankers in a supplied order
   status       index metadata and counts
@@ -96,9 +101,9 @@ Query languages used by `query` and `pipeline` (see `mdq manual TOPIC`):
   dataview-expr expression grammar used inside Dataview clauses
   dataviewjs   read-only DataviewJS-compatible runtime
 
-`search`, `query`, `backlinks`, `links`, `graph`, and `pipeline` automatically
-refresh a small amount of index drift (see `--auto-threshold`) and otherwise
-require an explicit `index` run.
+`search`, `query`, `backlinks`, `links`, `unresolved-links`, `graph`, and
+`pipeline` automatically refresh a small amount of index drift (see
+`--auto-threshold`) and otherwise require an explicit `index` run.
 
 Use `mdq manual TOPIC` for a focused reference, `mdq manual examples` for
 ready-made use cases, or `mdq manual all` for the complete manual."#;
@@ -191,6 +196,15 @@ Lists outgoing links from NOTE. Text output is one
 `raw_target<TAB>resolved_path<TAB>embed` row per line; an unresolved target
 prints `<unresolved>` in place of the resolved path. `--json` returns the
 full structured link records."#;
+
+const UNRESOLVED_LINKS: &str = r#"# unresolved-links command
+
+  mdq --vault PATH unresolved-links
+
+Lists vault-wide links that do not resolve to an indexed Markdown note or an
+existing non-Markdown vault file. Text output is one
+`source_path<TAB>raw_target<TAB>embed` row per line; `--json` returns the full
+structured link records."#;
 
 const GRAPH: &str = r#"# graph command
 

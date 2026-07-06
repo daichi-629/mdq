@@ -55,6 +55,7 @@ mdq --vault ~/notes query --language dataviewjs \
   'dv.list(dv.pages().map(page => page.file.link))'
 mdq --vault ~/notes backlinks "Folder/Note"
 mdq --vault ~/notes links "Folder/Note"
+mdq --vault ~/notes unresolved-links
 mdq --vault ~/notes graph "Folder/Note" --depth 2
 mdq --vault ~/notes status
 mdq manual
@@ -80,13 +81,13 @@ or rendered values rather than search chunks.
 
 ## Index freshness
 
-`search`, `query`, `backlinks`, `links`, `graph`, and `pipeline` check the
-index against the vault before running. If the vault already has an index and
-only a small number of files or chunks have drifted (`--auto-threshold`,
-default 20), `mdq` refreshes the index or embeddings automatically and
-proceeds. A vault that has never been indexed, or that has drifted past the
-threshold, requires an explicit `mdq index` run instead of refreshing
-silently.
+`search`, `query`, `backlinks`, `links`, `unresolved-links`, `graph`, and
+`pipeline` check the index against the vault before running. If the vault
+already has an index and only a small number of files or chunks have drifted
+(`--auto-threshold`, default 20), `mdq` refreshes the index or embeddings
+automatically and proceeds. A vault that has never been indexed, or that has
+drifted past the threshold, requires an explicit `mdq index` run instead of
+refreshing silently.
 
 ## Output
 
@@ -134,6 +135,8 @@ when it identifies a single Markdown note or non-Markdown vault file;
 ambiguous links remain unresolved. Non-Markdown files are not indexed as
 notes, but existing vault files such as Base documents and attachments are not
 counted as unresolved links in `status`.
+Use `mdq --vault ~/notes unresolved-links` to print the actual unresolved link
+records.
 
 ## Index location
 

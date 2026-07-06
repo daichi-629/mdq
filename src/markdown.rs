@@ -223,12 +223,20 @@ pub fn normalize_target(target: &str) -> String {
 
 fn is_external_destination(destination: &str) -> bool {
     let lowercase = destination.to_ascii_lowercase();
-    lowercase.starts_with("http:")
-        || lowercase.starts_with("https:")
-        || lowercase.starts_with("mailto:")
-        || lowercase.starts_with("data:")
-        || lowercase.starts_with("file:")
-        || lowercase.starts_with("//")
+    lowercase.starts_with("//") || has_uri_scheme(&lowercase)
+}
+
+fn has_uri_scheme(destination: &str) -> bool {
+    let Some((scheme, _)) = destination.split_once(':') else {
+        return false;
+    };
+    let mut chars = scheme.chars();
+    let Some(first) = chars.next() else {
+        return false;
+    };
+    first.is_ascii_alphabetic()
+        && chars.clone().count() > 0
+        && chars.all(|char| char.is_ascii_alphanumeric() || matches!(char, '+' | '-' | '.'))
 }
 
 #[cfg(test)]
@@ -258,12 +266,21 @@ mod tests {
     #[test]
     fn extracts_markdown_links_and_decodes_paths() {
         let links = extract_links(
-            "[note](<../Folder/A Note.md#Part> \"title\") ![embed](asset.png) [web](https://example.com)",
+            "[note](<../Folder/A Note.md#Part> \"title\") ![embed](asset.png) [web](https://example.com) [zotero](zotero://select/library/items/ABC123)",
         );
         assert_eq!(links.len(), 2);
         assert_eq!(links[0].target, "../folder/a note");
         assert_eq!(links[0].heading.as_deref(), Some("Part"));
         assert!(links[1].is_embed);
+    }
+
+    #[test]
+    fn ignores_markdown_links_with_arbitrary_uri_schemes() {
+        let links = extract_links(
+            "[zotero](zotero://select/library/items/ABC123) [obsidian](obsidian://open?vault=Notes) [tel](tel:+123456789) [path](folder:note.md) [windows](C:\\Users\\note.md)",
+        );
+        assert_eq!(links.len(), 1);
+        assert_eq!(links[0].target, "c:/users/note");
     }
 
     #[test]
