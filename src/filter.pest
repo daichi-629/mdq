@@ -1,3 +1,41 @@
+// mdq-doc: # Native frontmatter query
+// mdq-doc:
+// mdq-doc: Native queries operate on arbitrary YAML frontmatter. Dotted paths
+// mdq-doc: and array indices are structural only; no property name is reserved.
+// mdq-doc:
+// mdq-doc: Boolean syntax:
+// mdq-doc:   EXPR and EXPR
+// mdq-doc:   EXPR or EXPR
+// mdq-doc:   not EXPR
+// mdq-doc:   (EXPR)
+// mdq-doc:
+// mdq-doc: Operators:
+// mdq-doc:   =  ==  !=  >  >=  <  <=
+// mdq-doc:   contains        string substring, array element, or object key
+// mdq-doc:   contains_all    every expected array element is present
+// mdq-doc:   overlaps        at least one expected array element is present
+// mdq-doc:   in              value occurs in expected array
+// mdq-doc:   starts_with     string prefix
+// mdq-doc:   ends_with       string suffix
+// mdq-doc:   matches         regular expression; applies to a string field or to each
+// mdq-doc:                   element of an array field (any match = true); an invalid
+// mdq-doc:                   pattern is rejected at parse time with an error
+// mdq-doc:   exists          path exists
+// mdq-doc:   missing         path does not exist
+// mdq-doc:
+// mdq-doc: Values use YAML syntax: strings, numbers, booleans, null, flow
+// mdq-doc: lists, and flow objects. Numbers compare numerically. ISO dates and
+// mdq-doc: RFC 3339 timestamps compare chronologically.
+// mdq-doc:
+// mdq-doc: Examples:
+// mdq-doc:   mdq query 'status = active and score >= 3'
+// mdq-doc:   mdq query 'arbitrary.items contains value'
+// mdq-doc:   mdq query 'tags matches "daily"'
+// mdq-doc:   mdq query 'date >= 2026-01-01'
+// mdq-doc:   mdq query 'nested.key exists'
+// mdq-doc:
+// mdq-doc: This language is also available as `filter:` in retrieval pipelines.
+
 WHITESPACE = _{ " " | "\t" | NEWLINE }
 
 expression = { SOI ~ or_expr ~ EOI }

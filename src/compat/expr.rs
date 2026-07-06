@@ -2,15 +2,26 @@ use std::cmp::Ordering;
 
 use anyhow::{Context, Result, bail};
 use chrono::{Datelike, Local, NaiveDate, NaiveDateTime, Timelike};
-use pest::Parser;
 use pest::iterators::Pair;
-use pest_derive::Parser;
+use pest::{Parser, RuleType};
 use regex::Regex;
 use serde_json::{Map, Number, Value, json};
 
-#[derive(Parser)]
-#[grammar = "compat/expr.pest"]
-struct ExprParser;
+mod base_grammar {
+    use pest_derive::Parser;
+
+    #[derive(Parser)]
+    #[grammar = "compat/base.pest"]
+    pub(super) struct ExprParser;
+}
+
+mod dataview_grammar {
+    use pest_derive::Parser;
+
+    #[derive(Parser)]
+    #[grammar = "compat/dataview.pest"]
+    pub(super) struct ExprParser;
+}
 
 pub const KIND_KEY: &str = "__kind";
 
@@ -48,8 +59,16 @@ pub enum Op {
 
 impl Expr {
     pub fn parse(source: &str) -> Result<Self> {
-        let pair = ExprParser::parse(Rule::expression, source)
-            .with_context(|| format!("invalid compatibility expression: {source}"))?
+        let pair = base_grammar::ExprParser::parse(base_grammar::Rule::expression, source)
+            .with_context(|| format!("invalid Base expression: {source}"))?
+            .next()
+            .context("empty expression")?;
+        build(pair)
+    }
+
+    pub fn parse_dataview(source: &str) -> Result<Self> {
+        let pair = dataview_grammar::ExprParser::parse(dataview_grammar::Rule::expression, source)
+            .with_context(|| format!("invalid Dataview expression: {source}"))?
             .next()
             .context("empty expression")?;
         build(pair)
@@ -94,16 +113,16 @@ impl Expr {
     }
 }
 
-fn build(pair: Pair<'_, Rule>) -> Result<Expr> {
-    match pair.as_rule() {
-        Rule::expression | Rule::primary => build(pair.into_inner().next().context("empty node")?),
-        Rule::or_expr => fold(pair, Op::Or),
-        Rule::and_expr => fold(pair, Op::And),
-        Rule::unary_expr => {
+fn build<R: RuleType>(pair: Pair<'_, R>) -> Result<Expr> {
+    match rule_name(pair.as_rule()).as_str() {
+        "expression" | "primary" => build(pair.into_inner().next().context("empty node")?),
+        "or_expr" => fold(pair, Op::Or),
+        "and_expr" => fold(pair, Op::And),
+        "unary_expr" => {
             let mut negated = false;
             let mut expression = None;
             for inner in pair.into_inner() {
-                if inner.as_rule() == Rule::NOT {
+                if rule_is(inner.as_rule(), "NOT") {
                     negated = !negated;
                 } else {
                     expression = Some(build(inner)?);
@@ -116,7 +135,7 @@ fn build(pair: Pair<'_, Rule>) -> Result<Expr> {
                 expression
             })
         }
-        Rule::comparison => {
+        "comparison" => {
             let mut inner = pair.into_inner();
             let left = build(inner.next().context("missing comparison operand")?)?;
             let Some(operator) = inner.next() else {
@@ -134,7 +153,7 @@ fn build(pair: Pair<'_, Rule>) -> Result<Expr> {
             };
             Ok(Expr::Binary(Box::new(left), op, Box::new(right)))
         }
-        Rule::sum => {
+        "sum" => {
             let mut inner = pair.into_inner();
             let mut expression = build(inner.next().context("empty sum")?)?;
             while let Some(operator) = inner.next() {
@@ -148,7 +167,7 @@ fn build(pair: Pair<'_, Rule>) -> Result<Expr> {
             }
             Ok(expression)
         }
-        Rule::product => {
+        "product" => {
             let mut inner = pair.into_inner();
             let mut expression = build(inner.next().context("empty product")?)?;
             while let Some(operator) = inner.next() {
@@ -162,12 +181,12 @@ fn build(pair: Pair<'_, Rule>) -> Result<Expr> {
             }
             Ok(expression)
         }
-        Rule::postfix => {
+        "postfix" => {
             let mut inner = pair.into_inner();
             let mut expression = build(inner.next().context("empty postfix")?)?;
             for call in inner {
-                match call.as_rule() {
-                    Rule::method_call => {
+                match rule_name(call.as_rule()).as_str() {
+                    "method_call" => {
                         let mut parts = call.into_inner();
                         let name = parts
                             .next()
@@ -181,7 +200,7 @@ fn build(pair: Pair<'_, Rule>) -> Result<Expr> {
                             .unwrap_or_default();
                         expression = Expr::Method(Box::new(expression), name, args);
                     }
-                    Rule::field_call => {
+                    "field_call" => {
                         let name = call
                             .into_inner()
                             .next()
@@ -190,16 +209,16 @@ fn build(pair: Pair<'_, Rule>) -> Result<Expr> {
                             .to_owned();
                         expression = Expr::FieldAccess(Box::new(expression), name);
                     }
-                    Rule::index_call => {
+                    "index_call" => {
                         let index = build(call.into_inner().next().context("empty index")?)?;
                         expression = Expr::Index(Box::new(expression), Box::new(index));
                     }
-                    rule => bail!("unexpected postfix rule: {rule:?}"),
+                    rule => bail!("unexpected postfix rule: {rule}"),
                 }
             }
             Ok(expression)
         }
-        Rule::function_call => {
+        "function_call" => {
             let mut inner = pair.into_inner();
             let name = inner
                 .next()
@@ -221,58 +240,66 @@ fn build(pair: Pair<'_, Rule>) -> Result<Expr> {
                 Ok(Expr::Call(name, args))
             }
         }
-        Rule::arguments => bail!("arguments must be handled by a call"),
-        Rule::list => Ok(Expr::List(
+        "arguments" => bail!("arguments must be handled by a call"),
+        "list" => Ok(Expr::List(
             pair.into_inner().map(build).collect::<Result<Vec<_>>>()?,
         )),
-        Rule::object => {
+        "object" => {
             let mut entries = Vec::new();
             for entry in pair.into_inner() {
                 let mut inner = entry.into_inner();
                 let key_pair = inner.next().context("missing object key")?;
                 let key_inner = key_pair.into_inner().next().context("empty object key")?;
-                let key = match key_inner.as_rule() {
-                    Rule::string => unquote(key_inner.as_str()),
-                    Rule::identifier => key_inner.as_str().to_owned(),
-                    rule => bail!("unexpected object key rule: {rule:?}"),
+                let key = match rule_name(key_inner.as_rule()).as_str() {
+                    "string" => unquote(key_inner.as_str()),
+                    "identifier" => key_inner.as_str().to_owned(),
+                    rule => bail!("unexpected object key rule: {rule}"),
                 };
                 let value = build(inner.next().context("missing object value")?)?;
                 entries.push((key, value));
             }
             Ok(Expr::Object(entries))
         }
-        Rule::regex => {
+        "regex" => {
             let (pattern, flags) = split_regex_literal(pair.as_str());
             Ok(Expr::Regex(pattern, flags))
         }
-        Rule::identifier => Ok(Expr::Field(pair.as_str().to_owned())),
-        Rule::string => Ok(Expr::Literal(Value::String(unquote(pair.as_str())))),
-        Rule::number => {
+        "identifier" => Ok(Expr::Field(pair.as_str().to_owned())),
+        "string" => Ok(Expr::Literal(Value::String(unquote(pair.as_str())))),
+        "number" => {
             let number = pair.as_str().parse::<f64>()?;
             Ok(Expr::Literal(Value::Number(
                 Number::from_f64(number).context("invalid number")?,
             )))
         }
-        Rule::date_literal => Ok(Expr::Literal(Value::String(pair.as_str().to_owned()))),
-        Rule::boolean => Ok(Expr::Literal(Value::Bool(
+        "date_literal" => Ok(Expr::Literal(Value::String(pair.as_str().to_owned()))),
+        "boolean" => Ok(Expr::Literal(Value::Bool(
             pair.as_str().eq_ignore_ascii_case("true"),
         ))),
-        Rule::null => Ok(Expr::Literal(Value::Null)),
-        rule => bail!("unexpected expression rule: {rule:?}"),
+        "null" => Ok(Expr::Literal(Value::Null)),
+        rule => bail!("unexpected expression rule: {rule}"),
     }
 }
 
-fn build_arguments(pair: Pair<'_, Rule>) -> Result<Vec<Expr>> {
+fn build_arguments<R: RuleType>(pair: Pair<'_, R>) -> Result<Vec<Expr>> {
     pair.into_inner().map(build).collect()
 }
 
-fn fold(pair: Pair<'_, Rule>, op: Op) -> Result<Expr> {
+fn fold<R: RuleType>(pair: Pair<'_, R>, op: Op) -> Result<Expr> {
     let mut inner = pair.into_inner();
     let mut expression = build(inner.next().context("empty boolean expression")?)?;
     for item in inner {
         expression = Expr::Binary(Box::new(expression), op, Box::new(build(item)?));
     }
     Ok(expression)
+}
+
+fn rule_name<R: RuleType>(rule: R) -> String {
+    format!("{rule:?}")
+}
+
+fn rule_is<R: RuleType>(rule: R, expected: &str) -> bool {
+    rule_name(rule) == expected
 }
 
 fn unquote(value: &str) -> String {

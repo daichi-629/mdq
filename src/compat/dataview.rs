@@ -3,6 +3,9 @@ use std::fs;
 use std::path::{Component, Path};
 
 use anyhow::{Context, Result, bail};
+use pest::Parser;
+use pest::iterators::Pair;
+use pest_derive::Parser;
 use regex::Regex;
 use serde_json::{Value, json};
 
@@ -15,6 +18,10 @@ use super::{LinkIndex, page_value};
 
 pub struct DataviewAdapter;
 pub struct DataviewJsAdapter;
+
+#[derive(Parser)]
+#[grammar = "compat/dataview.pest"]
+struct DqlParser;
 
 impl QueryAdapter for DataviewAdapter {
     fn name(&self) -> &'static str {
@@ -106,15 +113,7 @@ impl DqlQuery {
     fn parse(source: &str) -> Result<Self> {
         let normalized = split_dql_clauses(source);
         let first = normalized.first().context("empty Dataview query")?;
-        let first_lower = first.to_ascii_lowercase();
-        let (kind, projection) = ["table", "list", "task", "calendar"]
-            .into_iter()
-            .find_map(|kind| {
-                first_lower
-                    .strip_prefix(kind)
-                    .map(|_| (kind.to_owned(), first[kind.len()..].trim()))
-            })
-            .context("Dataview query must start with TABLE, LIST, TASK, or CALENDAR")?;
+        let (kind, projection) = parse_head(first)?;
         let projection = projection
             .strip_prefix("WITHOUT ID")
             .or_else(|| projection.strip_prefix("without id"))
@@ -128,47 +127,7 @@ impl DqlQuery {
             operations: Vec::new(),
         };
         for line in normalized.into_iter().skip(1) {
-            let lower = line.to_ascii_lowercase();
-            if let Some(value) = lower.strip_prefix("from ") {
-                query.source = parse_source(&line[5..], value);
-            } else if lower.starts_with("where ") {
-                query
-                    .operations
-                    .push(DqlOperation::Where(Expr::parse(&line[6..])?));
-            } else if lower.starts_with("sort ") {
-                let value = &line[5..];
-                let mut sorts = Vec::new();
-                for sort in split_top_level(value, ',') {
-                    let sort = sort.trim();
-                    let descending = sort.to_ascii_lowercase().ends_with(" desc");
-                    let expression = sort
-                        .strip_suffix(" DESC")
-                        .or_else(|| sort.strip_suffix(" desc"))
-                        .or_else(|| sort.strip_suffix(" ASC"))
-                        .or_else(|| sort.strip_suffix(" asc"))
-                        .unwrap_or(sort);
-                    sorts.push(DqlSort {
-                        expr: Expr::parse(expression)?,
-                        descending,
-                    });
-                }
-                query.operations.push(DqlOperation::Sort(sorts));
-            } else if let Some(value) = lower.strip_prefix("limit ") {
-                query.operations.push(DqlOperation::Limit(
-                    value.parse().context("invalid Dataview LIMIT")?,
-                ));
-            } else if lower.starts_with("flatten ") {
-                let source = &line[8..];
-                let (expression, name) = split_alias(source);
-                query.operations.push(DqlOperation::Flatten(DqlFlatten {
-                    name: name.unwrap_or(expression).to_owned(),
-                    expr: Expr::parse(expression)?,
-                }));
-            } else if lower.starts_with("group by ") {
-                query
-                    .operations
-                    .push(DqlOperation::Group(Expr::parse(&line[9..])?));
-            }
+            apply_clause(&mut query, &line)?;
         }
         Ok(query)
     }
@@ -182,6 +141,100 @@ impl DqlQuery {
             .map(|(name, expression)| (name.clone(), expression.eval(value)))
             .collect()
     }
+}
+
+fn parse_head(source: &str) -> Result<(String, &str)> {
+    let pair = DqlParser::parse(Rule::dql_head, source)
+        .with_context(|| format!("invalid Dataview query head: {source}"))?
+        .next()
+        .context("empty Dataview query head")?;
+    let mut kind = None;
+    let mut projection = "";
+    for inner in pair.into_inner() {
+        match inner.as_rule() {
+            Rule::dql_kind => kind = Some(inner.as_str().to_ascii_lowercase()),
+            Rule::dql_rest => projection = inner.as_str().trim(),
+            _ => {}
+        }
+    }
+    let kind = kind.context("Dataview query must start with TABLE, LIST, TASK, or CALENDAR")?;
+    Ok((kind, projection))
+}
+
+fn apply_clause(query: &mut DqlQuery, line: &str) -> Result<()> {
+    let pair = DqlParser::parse(Rule::dql_line, line)
+        .with_context(|| format!("invalid Dataview clause: {line}"))?
+        .next()
+        .context("empty Dataview clause")?;
+    let clause = first_child(first_child(pair)?).context("empty Dataview clause")?;
+    match clause.as_rule() {
+        Rule::from_clause => {
+            let source = clause_text(clause)?;
+            query.source = parse_source(source, &source.to_ascii_lowercase());
+        }
+        Rule::where_clause => {
+            query
+                .operations
+                .push(DqlOperation::Where(Expr::parse_dataview(clause_text(
+                    clause,
+                )?)?));
+        }
+        Rule::sort_clause => {
+            let mut sorts = Vec::new();
+            for sort in split_top_level(clause_text(clause)?, ',') {
+                let sort = sort.trim();
+                let descending = sort.to_ascii_lowercase().ends_with(" desc");
+                let expression = sort
+                    .strip_suffix(" DESC")
+                    .or_else(|| sort.strip_suffix(" desc"))
+                    .or_else(|| sort.strip_suffix(" ASC"))
+                    .or_else(|| sort.strip_suffix(" asc"))
+                    .unwrap_or(sort);
+                sorts.push(DqlSort {
+                    expr: Expr::parse_dataview(expression)?,
+                    descending,
+                });
+            }
+            query.operations.push(DqlOperation::Sort(sorts));
+        }
+        Rule::limit_clause => {
+            let limit = first_child(clause)?
+                .as_str()
+                .parse()
+                .context("invalid Dataview LIMIT")?;
+            query.operations.push(DqlOperation::Limit(limit));
+        }
+        Rule::flatten_clause => {
+            let source = clause_text(clause)?;
+            let (expression, name) = split_alias(source);
+            query.operations.push(DqlOperation::Flatten(DqlFlatten {
+                name: name.unwrap_or(expression).to_owned(),
+                expr: Expr::parse_dataview(expression)?,
+            }));
+        }
+        Rule::group_clause => {
+            query
+                .operations
+                .push(DqlOperation::Group(Expr::parse_dataview(clause_text(
+                    clause,
+                )?)?));
+        }
+        rule => bail!("unexpected Dataview clause rule: {rule:?}"),
+    }
+    Ok(())
+}
+
+fn first_child<R: pest::RuleType>(pair: Pair<'_, R>) -> Result<Pair<'_, R>> {
+    pair.into_inner().next().context("empty parse node")
+}
+
+fn clause_text(pair: Pair<'_, Rule>) -> Result<&str> {
+    Ok(pair
+        .into_inner()
+        .find(|inner| inner.as_rule() == Rule::dql_rest)
+        .context("missing Dataview clause body")?
+        .as_str()
+        .trim())
 }
 
 fn flatten_values(values: Vec<Value>, flatten: &DqlFlatten) -> Vec<Value> {
@@ -250,7 +303,10 @@ fn parse_projection(source: &str) -> Result<Vec<(String, Expr)>> {
             let field = field.trim();
             let (expression, alias) = split_alias(field);
             let alias = alias.unwrap_or(field);
-            Ok((alias.trim_matches('"').to_owned(), Expr::parse(expression)?))
+            Ok((
+                alias.trim_matches('"').to_owned(),
+                Expr::parse_dataview(expression)?,
+            ))
         })
         .collect()
 }

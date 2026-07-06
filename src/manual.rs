@@ -1,6 +1,6 @@
 use anyhow::{Result, bail};
 
-include!(concat!(env!("OUT_DIR"), "/tasks_manual.rs"));
+include!(concat!(env!("OUT_DIR"), "/generated_manual.rs"));
 
 pub const TOPICS: &[&str] = &[
     "overview",
@@ -15,7 +15,9 @@ pub const TOPICS: &[&str] = &[
     "native",
     "tasks",
     "base",
+    "base-expr",
     "dataview",
+    "dataview-expr",
     "dataviewjs",
     "extensions",
     "examples",
@@ -33,10 +35,10 @@ pub fn render(topic: Option<&str>) -> Result<String> {
             GRAPH,
             PIPELINE,
             STATUS,
-            NATIVE,
+            GENERATED_NATIVE_MANUAL,
             GENERATED_TASKS_MANUAL,
-            BASE,
-            DATAVIEW,
+            &base_manual(),
+            &dataview_manual(),
             DATAVIEWJS,
             EXTENSIONS,
             EXAMPLES,
@@ -51,10 +53,14 @@ pub fn render(topic: Option<&str>) -> Result<String> {
         Some("graph") => Ok(GRAPH.to_owned()),
         Some("pipeline") => Ok(PIPELINE.to_owned()),
         Some("status") => Ok(STATUS.to_owned()),
-        Some("native") => Ok(NATIVE.to_owned()),
+        Some("native") | Some("filter") => Ok(GENERATED_NATIVE_MANUAL.to_owned()),
         Some("tasks") => Ok(GENERATED_TASKS_MANUAL.to_owned()),
-        Some("base") => Ok(BASE.to_owned()),
-        Some("dataview") | Some("dql") => Ok(DATAVIEW.to_owned()),
+        Some("base") => Ok(base_manual()),
+        Some("base-expr") | Some("base-expression") => Ok(GENERATED_BASE_EXPR_MANUAL.to_owned()),
+        Some("dataview") | Some("dql") => Ok(dataview_manual()),
+        Some("dataview-expr") | Some("dataview-expression") => {
+            Ok(GENERATED_DATAVIEW_EXPR_MANUAL.to_owned())
+        }
         Some("dataviewjs") | Some("dvjs") => Ok(DATAVIEWJS.to_owned()),
         Some("extensions") | Some("api") => Ok(EXTENSIONS.to_owned()),
         Some("examples") => Ok(EXAMPLES.to_owned()),
@@ -85,7 +91,9 @@ Query languages used by `query` and `pipeline` (see `mdq manual TOPIC`):
   native       generic frontmatter predicate language
   tasks        Obsidian Tasks-compatible task query subset
   base         Obsidian Base-compatible YAML query
+  base-expr    expression grammar used inside Base YAML fields
   dataview     Dataview DQL-compatible page/task query subset
+  dataview-expr expression grammar used inside Dataview clauses
   dataviewjs   read-only DataviewJS-compatible runtime
 
 `search`, `query`, `backlinks`, `links`, `graph`, and `pipeline` automatically
@@ -228,44 +236,6 @@ whether the index or embeddings are stale relative to the vault.
 `unresolved_links` excludes links to existing non-Markdown vault files such as
 Base documents and attachments."#;
 
-const NATIVE: &str = r#"# Native frontmatter query
-
-Native queries operate on arbitrary YAML frontmatter. Dotted paths and array
-indices are structural only; no property name is reserved.
-
-Boolean syntax:
-  EXPR and EXPR
-  EXPR or EXPR
-  not EXPR
-  (EXPR)
-
-Operators:
-  =  ==  !=  >  >=  <  <=
-  contains        string substring, array element, or object key
-  contains_all    every expected array element is present
-  overlaps        at least one expected array element is present
-  in              value occurs in expected array
-  starts_with     string prefix
-  ends_with       string suffix
-  matches         regular expression; applies to a string field or to each
-                  element of an array field (any match = true); an invalid
-                  pattern is rejected at parse time with an error
-  exists          path exists
-  missing         path does not exist
-
-Values use YAML syntax: strings, numbers, booleans, null, flow lists, and flow
-objects. Numbers compare numerically. ISO dates and RFC 3339 timestamps compare
-chronologically.
-
-Examples:
-  mdq query 'status = active and score >= 3'
-  mdq query 'arbitrary.items contains value'
-  mdq query 'tags matches "daily"'
-  mdq query 'date >= 2026-01-01'
-  mdq query 'nested.key exists'
-
-This language is also available as `filter:` in retrieval pipelines."#;
-
 const BASE: &str = r#"# Base-compatible query
 
 Input:
@@ -284,66 +254,6 @@ Supported view fields (views[0]):
   limit            integer row cap applied after sort
   groupBy          {property, direction} — emits {key, rows} records
   summaries        map of property → summary-type name
-
-Expressions:
-  Booleans:  and, or, not, &&, ||, !
-  Operators: =, ==, !=, >, >=, <, <=
-  Arithmetic: +, -, *, /, %
-  Field paths: `file.name`, `formula.label`, `note.score`, arbitrary frontmatter
-  Literals: string, number, boolean, null
-  Literals: list [a, b, c], object {key: value}
-  Index access: value[0], map["key"]
-  Regex: /pattern/flags
-
-Global functions:
-  if(cond, yes, no)         conditional
-  date(value)               parse to date object
-  today(), now()            current date/datetime
-  duration(string)          parse duration string (e.g. "7d", "2 weeks")
-  list(a, b, ...)           build a list
-  min(a, b, ...) / max(...) numeric min/max
-  number(value)             coerce to number
-  length(value)             string length, array length, or object key count
-  contains(a, b)            substring, array element, or object key check
-  icontains(a, b)           case-insensitive contains
-  startswith(a, b)          string prefix
-  endswith(a, b)            string suffix
-  join(list, sep)           join array to string
-  file(path)                build file stub from path
-  link(value, display)      build a link value
-  html(value)               wrap as HTML value
-  icon(name)                build an icon value
-  image(path)               build an image value
-
-String methods (.method()):
-  .lower() / .upper() / .title() / .trim() / .reverse()
-  .contains(x) / .containsAll(a,b) / .containsAny(a,b)
-  .startsWith(x) / .endsWith(x)
-  .replace(pat, rep) — pat may be a regex literal
-  .split(sep, limit?) / .slice(start, end?)
-  .repeat(n) / .length
-  .date() — parse string as date
-  .format(pattern) — Moment.js format string
-
-Number methods:
-  .abs() / .ceil() / .floor() / .round(digits?) / .toFixed(n)
-
-List methods:
-  .contains(x) / .containsAll(a,b) / .containsAny(a,b)
-  .filter(expr) / .map(expr) / .reduce(expr, init?)
-  .sort() / .reverse() / .unique() / .flat()
-  .slice(start, end?) / .join(sep) / .length
-
-Date methods:
-  .date() / .format(pattern) / .time() / .relative()
-  .year / .month / .day / .hour / .minute / .second
-
-File methods:
-  .inFolder(path) / .hasTag(tag) / .hasProperty(name)
-  .asLink(display?) / .hasLink(path)
-
-Link methods:
-  .asFile() / .linksTo(path)
 
 Named summary types (for views[0].summaries):
   Count, Sum, Average, Min, Max, Range, Median, Stddev
@@ -367,22 +277,7 @@ Input:
   mdq query --language dataview \
     'TABLE title AS Name, created FROM "Daily" WHERE created >= date(2026-01-01) SORT created DESC LIMIT 10'
 
-Query forms:
-  TABLE FIELD [AS NAME], ...
-  LIST [FIELD]
-  TASK
-  CALENDAR [FIELD]
-
-Clauses may be on one line or separate lines:
-  FROM ""
-  FROM "folder"
-  FROM #tag
-  WHERE EXPR
-  SORT EXPR [ASC|DESC]
-  LIMIT NUMBER
-
-Expressions share the Base expression evaluator. Page rows expose arbitrary
-frontmatter plus:
+Page rows expose arbitrary frontmatter plus:
   file.path, file.name, file.folder, file.ext, file.link, file.size,
   file.mtime, file.tags, file.frontmatter
 
@@ -394,6 +289,14 @@ Current compatibility limits:
   - FLATTEN expands array values and accepts `FLATTEN EXPR AS NAME`.
   - Dataview's complete function library, durations, regex literals, and link
     comparison semantics are only partially implemented."#;
+
+fn base_manual() -> String {
+    [BASE, GENERATED_BASE_EXPR_MANUAL].join("\n\n")
+}
+
+fn dataview_manual() -> String {
+    [DATAVIEW, GENERATED_DATAVIEW_EXPR_MANUAL].join("\n\n")
+}
 
 const DATAVIEWJS: &str = r#"# DataviewJS-compatible query
 
@@ -515,13 +418,32 @@ mod tests {
 
     #[test]
     fn tasks_manual_is_generated_from_pest_doc_markers() {
-        let expected = include_str!("compat/tasks.pest")
+        assert_generated_manual("tasks", include_str!("compat/tasks.pest"));
+    }
+
+    #[test]
+    fn native_manual_is_generated_from_pest_doc_markers() {
+        assert_generated_manual("native", include_str!("filter.pest"));
+    }
+
+    #[test]
+    fn base_expression_manual_is_generated_from_pest_doc_markers() {
+        assert_generated_manual("base-expr", include_str!("compat/base.pest"));
+    }
+
+    #[test]
+    fn dataview_expression_manual_is_generated_from_pest_doc_markers() {
+        assert_generated_manual("dataview-expr", include_str!("compat/dataview.pest"));
+    }
+
+    fn assert_generated_manual(topic: &str, source: &str) {
+        let expected = source
             .lines()
             .filter_map(|line| line.trim_start().strip_prefix("// mdq-doc:"))
             .map(str::trim_start)
             .collect::<Vec<_>>()
             .join("\n");
 
-        assert_eq!(render(Some("tasks")).unwrap(), expected);
+        assert_eq!(render(Some(topic)).unwrap(), expected);
     }
 }

@@ -1,0 +1,159 @@
+// mdq-doc: # Dataview DQL-compatible query
+// mdq-doc:
+// mdq-doc: Query forms:
+// mdq-doc:   TABLE FIELD [AS NAME], ...
+// mdq-doc:   LIST [FIELD]
+// mdq-doc:   TASK
+// mdq-doc:   CALENDAR [FIELD]
+// mdq-doc:
+// mdq-doc: Clauses may be on one line or separate lines:
+// mdq-doc:   FROM ""
+// mdq-doc:   FROM "folder"
+// mdq-doc:   FROM #tag
+// mdq-doc:   WHERE EXPR
+// mdq-doc:   SORT EXPR [ASC|DESC], ...
+// mdq-doc:   FLATTEN EXPR [AS NAME]
+// mdq-doc:   GROUP BY EXPR
+// mdq-doc:   LIMIT NUMBER
+// mdq-doc:
+// mdq-doc: Dataview TABLE/LIST/CALENDAR fields, WHERE, SORT, FLATTEN, and
+// mdq-doc: GROUP BY clauses use the expression evaluator below.
+// mdq-doc:
+// mdq-doc: Boolean syntax:
+// mdq-doc:   EXPR and EXPR
+// mdq-doc:   EXPR or EXPR
+// mdq-doc:   not EXPR
+// mdq-doc:   EXPR && EXPR
+// mdq-doc:   EXPR || EXPR
+// mdq-doc:   !EXPR
+// mdq-doc:   (EXPR)
+// mdq-doc:
+// mdq-doc: Operators:
+// mdq-doc:   =  ==  !=  >  >=  <  <=
+// mdq-doc:   +  -  *  /  %
+// mdq-doc:
+// mdq-doc: Field and collection syntax:
+// mdq-doc:   file.name
+// mdq-doc:   formula.label
+// mdq-doc:   note.score
+// mdq-doc:   value[0]
+// mdq-doc:   map["key"]
+// mdq-doc:   [a, b, c]
+// mdq-doc:   {key: value}
+// mdq-doc:
+// mdq-doc: Literals:
+// mdq-doc:   string, number, boolean, null
+// mdq-doc:   date literal YYYY-MM-DD
+// mdq-doc:   regex literal /pattern/flags
+// mdq-doc:
+// mdq-doc: Global functions:
+// mdq-doc:   if(cond, yes, no)         conditional
+// mdq-doc:   date(value)               parse to date object
+// mdq-doc:   today(), now()            current date/datetime
+// mdq-doc:   duration(string)          parse duration string (e.g. "7d", "2 weeks")
+// mdq-doc:   list(a, b, ...)           build a list
+// mdq-doc:   min(a, b, ...) / max(...) numeric min/max
+// mdq-doc:   number(value)             coerce to number
+// mdq-doc:   length(value)             string length, array length, or object key count
+// mdq-doc:   contains(a, b)            substring, array element, or object key check
+// mdq-doc:   icontains(a, b)           case-insensitive contains
+// mdq-doc:   startswith(a, b)          string prefix
+// mdq-doc:   endswith(a, b)            string suffix
+// mdq-doc:   join(list, sep)           join array to string
+// mdq-doc:   file(path)                build file stub from path
+// mdq-doc:   link(value, display)      build a link value
+// mdq-doc:   html(value)               wrap as HTML value
+// mdq-doc:   icon(name)                build an icon value
+// mdq-doc:   image(path)               build an image value
+// mdq-doc:
+// mdq-doc: String methods:
+// mdq-doc:   .lower() / .upper() / .title() / .trim() / .reverse()
+// mdq-doc:   .contains(x) / .containsAll(a,b) / .containsAny(a,b)
+// mdq-doc:   .startsWith(x) / .endsWith(x)
+// mdq-doc:   .replace(pat, rep) - pat may be a regex literal
+// mdq-doc:   .split(sep, limit?) / .slice(start, end?)
+// mdq-doc:   .repeat(n) / .length
+// mdq-doc:   .date() - parse string as date
+// mdq-doc:   .format(pattern) - Moment.js format string
+// mdq-doc:
+// mdq-doc: Number methods:
+// mdq-doc:   .abs() / .ceil() / .floor() / .round(digits?) / .toFixed(n)
+// mdq-doc:
+// mdq-doc: List methods:
+// mdq-doc:   .contains(x) / .containsAll(a,b) / .containsAny(a,b)
+// mdq-doc:   .filter(expr) / .map(expr) / .reduce(expr, init?)
+// mdq-doc:   .sort() / .reverse() / .unique() / .flat()
+// mdq-doc:   .slice(start, end?) / .join(sep) / .length
+// mdq-doc:
+// mdq-doc: Date methods:
+// mdq-doc:   .date() / .format(pattern) / .time() / .relative()
+// mdq-doc:   .year / .month / .day / .hour / .minute / .second
+// mdq-doc:
+// mdq-doc: File methods:
+// mdq-doc:   .inFolder(path) / .hasTag(tag) / .hasProperty(name)
+// mdq-doc:   .asLink(display?) / .hasLink(path)
+// mdq-doc:
+// mdq-doc: Link methods:
+// mdq-doc:   .asFile() / .linksTo(path)
+
+WHITESPACE = _{ " " | "\t" | "\r" | "\n" }
+dql_head = { SOI ~ dql_kind ~ dql_rest? ~ EOI }
+dql_kind = { ^"table" | ^"list" | ^"task" | ^"calendar" }
+dql_line = { SOI ~ dql_clause ~ EOI }
+dql_clause = { from_clause | where_clause | sort_clause | limit_clause | flatten_clause | group_clause }
+from_clause = { ^"from" ~ dql_rest }
+where_clause = { ^"where" ~ dql_rest }
+sort_clause = { ^"sort" ~ dql_rest }
+limit_clause = { ^"limit" ~ int }
+flatten_clause = { ^"flatten" ~ dql_rest }
+group_clause = { ^"group" ~ ^"by" ~ dql_rest }
+dql_rest = @{ ANY+ }
+int = @{ ASCII_DIGIT+ }
+
+expression = { SOI ~ or_expr ~ EOI }
+or_expr = { and_expr ~ (OR ~ and_expr)* }
+and_expr = { unary_expr ~ (AND ~ unary_expr)* }
+unary_expr = { NOT* ~ comparison }
+comparison = { sum ~ (operator ~ sum)? }
+sum = { product ~ (add_operator ~ product)* }
+add_operator = { "+" | "-" }
+product = { postfix ~ (mul_operator ~ postfix)* }
+mul_operator = { "*" | "/" | "%" }
+postfix = { primary ~ (method_call | field_call | index_call)* }
+primary = {
+    function_call
+  | object
+  | list
+  | regex
+  | string
+  | date_literal
+  | number
+  | boolean
+  | null
+  | identifier
+  | "(" ~ or_expr ~ ")"
+}
+function_call = { identifier ~ "(" ~ arguments? ~ ")" }
+method_call = { "." ~ identifier ~ "(" ~ arguments? ~ ")" }
+field_call = { "." ~ identifier }
+index_call = { "[" ~ or_expr ~ "]" }
+arguments = { or_expr ~ ("," ~ or_expr)* }
+list = { "[" ~ (or_expr ~ ("," ~ or_expr)*)? ~ "]" }
+object = { "{" ~ (object_entry ~ ("," ~ object_entry)*)? ~ "}" }
+object_entry = { object_key ~ ":" ~ or_expr }
+object_key = { string | identifier }
+operator = { ">=" | "<=" | "!=" | "==" | "=" | ">" | "<" }
+identifier_char = _{ ASCII_ALPHANUMERIC | "_" | "-" | "#" | NON_ASCII }
+OR = _{ (^"or" ~ !identifier_char) | "||" }
+AND = _{ (^"and" ~ !identifier_char) | "&&" }
+NOT = { (^"not" ~ !identifier_char) | "!" }
+boolean = { (^"true" | ^"false") ~ !identifier_char }
+null = { ^"null" ~ !identifier_char }
+number = @{ "-"? ~ ASCII_DIGIT+ ~ ("." ~ ASCII_DIGIT+)? }
+date_literal = @{ ASCII_DIGIT{4} ~ "-" ~ ASCII_DIGIT{2} ~ "-" ~ ASCII_DIGIT{2} }
+string = @{ single_string | double_string }
+single_string = { "'" ~ ("\\'" | !"'" ~ ANY)* ~ "'" }
+double_string = { "\"" ~ ("\\\"" | !"\"" ~ ANY)* ~ "\"" }
+regex = @{ "/" ~ (("\\" ~ ANY) | !("/" | NEWLINE) ~ ANY)+ ~ "/" ~ ASCII_ALPHA* }
+identifier = @{ (ASCII_ALPHANUMERIC | "_" | "-" | "#" | NON_ASCII)+ }
+NON_ASCII = _{ '\u{80}'..'\u{10ffff}' }
