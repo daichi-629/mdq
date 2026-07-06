@@ -130,7 +130,10 @@ lexicographically.
 `mdq` indexes both Wiki links and standard Markdown links. Relative Markdown
 paths are resolved from the source file directory, percent-encoded paths are
 decoded, and external URLs are ignored. A filename-only link is resolved only
-when it identifies a single Markdown file; ambiguous links remain unresolved.
+when it identifies a single Markdown note or non-Markdown vault file;
+ambiguous links remain unresolved. Non-Markdown files are not indexed as
+notes, but existing vault files such as Base documents and attachments are not
+counted as unresolved links in `status`.
 
 ## Index location
 

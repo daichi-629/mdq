@@ -431,7 +431,7 @@ impl Database {
         };
         self.link_query(
             "
-            SELECT s.path, s.title, t.path, t.title, l.raw_target, l.heading, l.is_embed
+            SELECT s.path, s.title, t.path, t.title, l.raw_target, l.heading, l.is_embed, l.normalized_target
             FROM links l
             JOIN notes s ON s.id = l.source_note_id
             LEFT JOIN notes t ON t.id = l.target_note_id
@@ -445,31 +445,18 @@ impl Database {
     /// Every link in the vault, for bulk construction of compatibility
     /// `file.links` / `file.backlinks` / `file.embeds` fields without N+1 queries.
     pub fn all_links(&self) -> Result<Vec<LinkRef>> {
+        let file_index = self.non_note_file_index()?;
         let mut statement = self.connection.prepare(
             "
-            SELECT s.path, s.title, t.path, t.title, l.raw_target, l.heading, l.is_embed
+            SELECT s.path, s.title, t.path, t.title, l.raw_target, l.heading, l.is_embed, l.normalized_target
             FROM links l
             JOIN notes s ON s.id = l.source_note_id
             LEFT JOIN notes t ON t.id = l.target_note_id
             ORDER BY s.path, l.id
             ",
         )?;
-        let rows = statement.query_map([], |row| {
-            let target_path: Option<String> = row.get(2)?;
-            let target_title: Option<String> = row.get(3)?;
-            Ok(LinkRef {
-                source: NoteRef {
-                    path: row.get(0)?,
-                    title: row.get(1)?,
-                },
-                target: target_path
-                    .zip(target_title)
-                    .map(|(path, title)| NoteRef { path, title }),
-                raw_target: row.get(4)?,
-                heading: row.get(5)?,
-                embed: row.get(6)?,
-            })
-        })?;
+        let rows =
+            statement.query_map([], |row| self.link_ref_from_row(row, file_index.as_ref()))?;
         rows.collect::<rusqlite::Result<Vec<_>>>()
             .map_err(Into::into)
     }
@@ -481,7 +468,7 @@ impl Database {
         };
         self.link_query(
             "
-            SELECT s.path, s.title, t.path, t.title, l.raw_target, l.heading, l.is_embed
+            SELECT s.path, s.title, t.path, t.title, l.raw_target, l.heading, l.is_embed, l.normalized_target
             FROM links l
             JOIN notes s ON s.id = l.source_note_id
             LEFT JOIN notes t ON t.id = l.target_note_id
@@ -493,25 +480,42 @@ impl Database {
     }
 
     fn link_query(&self, sql: &str, note_id: i64) -> Result<Vec<LinkRef>> {
+        let file_index = self.non_note_file_index()?;
         let mut statement = self.connection.prepare(sql)?;
         let rows = statement.query_map([note_id], |row| {
-            let target_path: Option<String> = row.get(2)?;
-            let target_title: Option<String> = row.get(3)?;
-            Ok(LinkRef {
-                source: NoteRef {
-                    path: row.get(0)?,
-                    title: row.get(1)?,
-                },
-                target: target_path
-                    .zip(target_title)
-                    .map(|(path, title)| NoteRef { path, title }),
-                raw_target: row.get(4)?,
-                heading: row.get(5)?,
-                embed: row.get(6)?,
-            })
+            self.link_ref_from_row(row, file_index.as_ref())
         })?;
         rows.collect::<rusqlite::Result<Vec<_>>>()
             .map_err(Into::into)
+    }
+
+    fn link_ref_from_row(
+        &self,
+        row: &rusqlite::Row<'_>,
+        file_index: Option<&NonNoteFileIndex>,
+    ) -> rusqlite::Result<LinkRef> {
+        let source_path: String = row.get(0)?;
+        let target_path: Option<String> = row.get(2)?;
+        let target_title: Option<String> = row.get(3)?;
+        let normalized_target: String = row.get(7)?;
+        let target = target_path
+            .clone()
+            .zip(target_title)
+            .map(|(path, title)| NoteRef { path, title });
+        let resolved_path = target_path.or_else(|| {
+            file_index.and_then(|index| index.resolve(&source_path, &normalized_target))
+        });
+        Ok(LinkRef {
+            source: NoteRef {
+                path: source_path,
+                title: row.get(1)?,
+            },
+            target,
+            resolved_path,
+            raw_target: row.get(4)?,
+            heading: row.get(5)?,
+            embed: row.get(6)?,
+        })
     }
 
     pub fn note_body(&self, path: &str) -> Result<Option<(NoteRef, String)>> {
@@ -557,11 +561,7 @@ impl Database {
             notes: count("notes")?,
             chunks: count("chunks")?,
             links: count("links")?,
-            unresolved_links: self.connection.query_row(
-                "SELECT count(*) FROM links WHERE target_note_id IS NULL",
-                [],
-                |row| row.get::<_, i64>(0),
-            )? as usize,
+            unresolved_links: self.unresolved_links_count()?,
             embeddings: self.connection.query_row(
                 "
                 SELECT count(*)
@@ -719,6 +719,104 @@ impl Database {
             .query_map([filename], |row| row.get(0))?
             .collect::<rusqlite::Result<Vec<i64>>>()?;
         Ok((title_ids.len() == 1).then(|| title_ids[0]))
+    }
+
+    fn unresolved_links_count(&self) -> Result<usize> {
+        let file_index = self.non_note_file_index()?;
+        let mut statement = self.connection.prepare(
+            "
+            SELECT l.normalized_target, n.path
+            FROM links l
+            JOIN notes n ON n.id = l.source_note_id
+            WHERE l.target_note_id IS NULL
+            ",
+        )?;
+        let rows = statement.query_map([], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+        })?;
+        let mut unresolved = 0;
+        for row in rows {
+            let (target, source_path) = row?;
+            if !file_index
+                .as_ref()
+                .is_some_and(|index| index.resolve(&source_path, &target).is_some())
+            {
+                unresolved += 1;
+            }
+        }
+        Ok(unresolved)
+    }
+
+    fn non_note_file_index(&self) -> Result<Option<NonNoteFileIndex>> {
+        self.metadata("vault")?
+            .map(|vault| NonNoteFileIndex::build(Path::new(&vault)))
+            .transpose()
+    }
+}
+
+struct NonNoteFileIndex {
+    by_path: HashMap<String, String>,
+    by_filename: HashMap<String, Vec<String>>,
+}
+
+impl NonNoteFileIndex {
+    fn build(vault: &Path) -> Result<Self> {
+        let mut by_path = HashMap::new();
+        let mut by_filename: HashMap<String, Vec<String>> = HashMap::new();
+        for entry in WalkDir::new(vault)
+            .follow_links(false)
+            .into_iter()
+            .filter_entry(visible_entry)
+            .filter_map(Result::ok)
+            .filter(|entry| entry.file_type().is_file())
+            .filter(|entry| {
+                !entry
+                    .path()
+                    .extension()
+                    .is_some_and(|extension| extension.eq_ignore_ascii_case("md"))
+            })
+        {
+            let relative = entry
+                .path()
+                .strip_prefix(vault)
+                .unwrap_or(entry.path())
+                .to_string_lossy()
+                .replace('\\', "/");
+            let key = collapse_path(&relative);
+            by_path.insert(key, relative.clone());
+            if let Some(filename) = relative.rsplit('/').next() {
+                by_filename
+                    .entry(filename.to_lowercase())
+                    .or_default()
+                    .push(relative);
+            }
+        }
+        Ok(Self {
+            by_path,
+            by_filename,
+        })
+    }
+
+    fn resolve(&self, source_path: &str, target: &str) -> Option<String> {
+        let mut target_forms = vec![collapse_path(target)];
+        if let Some((parent, _)) = source_path.rsplit_once('/') {
+            target_forms.push(collapse_path(&format!("{parent}/{target}")));
+        }
+        target_forms.dedup();
+
+        for form in &target_forms {
+            if let Some(path) = self.by_path.get(form) {
+                return Some(path.clone());
+            }
+        }
+
+        if target_forms[0].contains('/') {
+            return None;
+        }
+        self.by_filename
+            .get(&target_forms[0])
+            .filter(|paths| paths.len() == 1)
+            .map(|paths| paths[0].clone())
     }
 }
 
@@ -996,6 +1094,35 @@ mod tests {
         assert_eq!(links.len(), 1);
         let backlinks = database.backlinks("b/Alpha").unwrap();
         assert_eq!(backlinks.len(), 1);
+    }
+
+    #[test]
+    fn existing_non_markdown_files_are_not_counted_as_unresolved_links() {
+        let directory = tempfile::tempdir().unwrap();
+        let vault = directory.path().join("notes");
+        fs::create_dir_all(vault.join("views")).unwrap();
+        fs::create_dir_all(vault.join("assets")).unwrap();
+        fs::write(vault.join("views/open.base"), "filters: \"true\"\n").unwrap();
+        fs::write(vault.join("assets/logo.png"), "png").unwrap();
+        fs::write(
+            vault.join("index.md"),
+            "# Index\n[Base](views/open.base)\n![[logo.png]]\n[[missing.pdf]]\n",
+        )
+        .unwrap();
+
+        let mut database = Database::open(&directory.path().join("index.sqlite3")).unwrap();
+        database.rebuild(&vault).unwrap();
+
+        let status = database.status("test-model").unwrap();
+        assert_eq!(status.links, 3);
+        assert_eq!(status.unresolved_links, 1);
+
+        let links = database.outgoing_links("index").unwrap();
+        let resolved: Vec<Option<String>> =
+            links.into_iter().map(|link| link.resolved_path).collect();
+        assert!(resolved.contains(&Some("views/open.base".to_owned())));
+        assert!(resolved.contains(&Some("assets/logo.png".to_owned())));
+        assert!(resolved.contains(&None));
     }
 
     #[test]

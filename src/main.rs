@@ -328,8 +328,7 @@ fn main() -> Result<()> {
             } else {
                 for link in links {
                     let resolved = link
-                        .target
-                        .map(|target| target.path)
+                        .resolved_path
                         .unwrap_or_else(|| "<unresolved>".to_owned());
                     println!("{}\t{}\t{}", link.raw_target, resolved, link.embed);
                 }

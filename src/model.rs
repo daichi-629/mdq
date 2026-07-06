@@ -63,6 +63,7 @@ pub struct PageRecord {
 pub struct LinkRef {
     pub source: NoteRef,
     pub target: Option<NoteRef>,
+    pub resolved_path: Option<String>,
     pub raw_target: String,
     pub heading: Option<String>,
     pub embed: bool,

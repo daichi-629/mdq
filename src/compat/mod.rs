@@ -36,9 +36,8 @@ impl LinkIndex {
         let mut by_target: HashMap<String, Vec<Value>> = HashMap::new();
         for link in database.all_links()? {
             let path = link
-                .target
-                .as_ref()
-                .map(|target| target.path.clone())
+                .resolved_path
+                .clone()
                 .unwrap_or(link.raw_target.clone());
             let display = link
                 .target

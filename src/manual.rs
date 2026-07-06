@@ -224,7 +224,9 @@ const STATUS: &str = r#"# status command
 
 Shows index metadata: vault path, `indexed_at` timestamp, note/chunk/link
 counts, `unresolved_links`, `embeddings` and `cached_embeddings` counts, and
-whether the index or embeddings are stale relative to the vault."#;
+whether the index or embeddings are stale relative to the vault.
+`unresolved_links` excludes links to existing non-Markdown vault files such as
+Base documents and attachments."#;
 
 const NATIVE: &str = r#"# Native frontmatter query
 
