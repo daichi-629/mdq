@@ -1,8 +1,9 @@
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
+use std::time::Duration;
 
 use anyhow::{Context, Result};
-use rusqlite::{Connection, OptionalExtension, params};
+use rusqlite::{Connection, OpenFlags, OptionalExtension, params};
 use sha2::{Digest, Sha256};
 use walkdir::{DirEntry, WalkDir};
 
@@ -15,6 +16,12 @@ pub struct Database {
     connection: Connection,
 }
 
+fn configure_connection(connection: &Connection) -> Result<()> {
+    connection.busy_timeout(Duration::from_secs(30))?;
+    connection.execute_batch("PRAGMA foreign_keys = ON;")?;
+    Ok(())
+}
+
 impl Database {
     pub fn open(path: &Path) -> Result<Self> {
         if let Some(parent) = path.parent() {
@@ -22,6 +29,7 @@ impl Database {
         }
         let connection = Connection::open(path)
             .with_context(|| format!("failed to open index {}", path.display()))?;
+        configure_connection(&connection)?;
         connection.execute_batch(
             "
             PRAGMA foreign_keys = ON;
@@ -96,6 +104,16 @@ impl Database {
             "body_start_line",
             "INTEGER NOT NULL DEFAULT 1",
         )?;
+        Ok(Self { connection })
+    }
+
+    pub fn open_existing(path: &Path) -> Result<Self> {
+        let connection = Connection::open_with_flags(
+            path,
+            OpenFlags::SQLITE_OPEN_READ_WRITE,
+        )
+        .with_context(|| format!("failed to open existing index {}", path.display()))?;
+        configure_connection(&connection)?;
         Ok(Self { connection })
     }
 

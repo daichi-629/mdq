@@ -161,7 +161,16 @@ fn main() -> Result<()> {
         bail!("vault must be a directory: {}", vault.display());
     }
     let db_path = cli.db.unwrap_or(default_db_path(&vault)?);
-    let mut database = Database::open(&db_path)?;
+    let mut database = if matches!(cli.command, Command::Index { .. }) {
+        Database::open(&db_path)?
+    } else {
+        Database::open_existing(&db_path).with_context(|| {
+            format!(
+                "index is not initialized; run `mdq --vault {} index` first",
+                vault.display()
+            )
+        })?
+    };
     let pipeline = PipelineEngine::standard();
 
     let needs_fresh_index = !matches!(
