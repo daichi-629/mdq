@@ -1,5 +1,7 @@
 use anyhow::{Result, bail};
 
+use crate::schema;
+
 include!(concat!(env!("OUT_DIR"), "/generated_manual.rs"));
 
 pub const TOPICS: &[&str] = &[
@@ -13,6 +15,7 @@ pub const TOPICS: &[&str] = &[
     "graph",
     "pipeline",
     "status",
+    "json-schemas",
     "native",
     "tasks",
     "base",
@@ -26,36 +29,38 @@ pub const TOPICS: &[&str] = &[
 
 pub fn render(topic: Option<&str>) -> Result<String> {
     match topic {
-        None | Some("all") => Ok([
-            OVERVIEW,
-            INDEX,
-            SEARCH,
-            QUERY,
-            BACKLINKS,
-            LINKS,
-            UNRESOLVED_LINKS,
-            GRAPH,
-            PIPELINE,
-            STATUS,
-            GENERATED_NATIVE_MANUAL,
-            GENERATED_TASKS_MANUAL,
-            &base_manual(),
-            &dataview_manual(),
-            DATAVIEWJS,
-            EXTENSIONS,
-            EXAMPLES,
+        None | Some("all") => Ok(vec![
+            OVERVIEW.to_owned(),
+            index_manual(),
+            search_manual(),
+            query_manual(),
+            backlinks_manual(),
+            links_manual(),
+            unresolved_links_manual(),
+            graph_manual(),
+            pipeline_manual(),
+            status_manual(),
+            json_schemas_manual(),
+            GENERATED_NATIVE_MANUAL.to_owned(),
+            GENERATED_TASKS_MANUAL.to_owned(),
+            base_manual(),
+            dataview_manual(),
+            DATAVIEWJS.to_owned(),
+            EXTENSIONS.to_owned(),
+            EXAMPLES.to_owned(),
         ]
         .join("\n\n")),
         Some("overview") => Ok(OVERVIEW.to_owned()),
-        Some("index") => Ok(INDEX.to_owned()),
-        Some("search") => Ok(SEARCH.to_owned()),
-        Some("query") => Ok(QUERY.to_owned()),
-        Some("backlinks") => Ok(BACKLINKS.to_owned()),
-        Some("links") => Ok(LINKS.to_owned()),
-        Some("unresolved-links") | Some("unresolved") => Ok(UNRESOLVED_LINKS.to_owned()),
-        Some("graph") => Ok(GRAPH.to_owned()),
-        Some("pipeline") => Ok(PIPELINE.to_owned()),
-        Some("status") => Ok(STATUS.to_owned()),
+        Some("index") => Ok(index_manual()),
+        Some("search") => Ok(search_manual()),
+        Some("query") => Ok(query_manual()),
+        Some("backlinks") => Ok(backlinks_manual()),
+        Some("links") => Ok(links_manual()),
+        Some("unresolved-links") | Some("unresolved") => Ok(unresolved_links_manual()),
+        Some("graph") => Ok(graph_manual()),
+        Some("pipeline") => Ok(pipeline_manual()),
+        Some("status") => Ok(status_manual()),
+        Some("json-schemas") | Some("schemas") => Ok(json_schemas_manual()),
         Some("native") | Some("filter") => Ok(GENERATED_NATIVE_MANUAL.to_owned()),
         Some("tasks") => Ok(GENERATED_TASKS_MANUAL.to_owned()),
         Some("base") => Ok(base_manual()),
@@ -72,6 +77,112 @@ pub fn render(topic: Option<&str>) -> Result<String> {
             TOPICS.join(", ")
         ),
     }
+}
+
+fn schema_section(schema: &str) -> String {
+    format!(
+        "JSON output schema (--json), generated from Rust output types:\n{}",
+        schema_code_block(schema)
+    )
+}
+
+fn schema_code_block(schema: &str) -> String {
+    format!("```json\n{schema}\n```")
+}
+
+fn search_manual() -> String {
+    SEARCH.replace(
+        "{search_json_schema}",
+        &schema_section(&schema::command_schema_json("search").expect("search schema exists")),
+    )
+}
+
+fn index_manual() -> String {
+    INDEX.replace(
+        "{index_json_schema}",
+        &schema_section(&schema::command_schema_json("index").expect("index schema exists")),
+    )
+}
+
+fn query_manual() -> String {
+    QUERY
+        .replace(
+            "{query_native_json_schema}",
+            &schema_code_block(
+                &schema::command_schema_json("query native").expect("query schema exists"),
+            ),
+        )
+        .replace(
+            "{query_record_set_json_schema}",
+            &schema_code_block(
+                &schema::command_schema_json("query record-set").expect("record set schema exists"),
+            ),
+        )
+}
+
+fn backlinks_manual() -> String {
+    BACKLINKS.replace(
+        "{link_ref_json_schema}",
+        &schema_section(
+            &schema::command_schema_json("backlinks").expect("backlinks schema exists"),
+        ),
+    )
+}
+
+fn links_manual() -> String {
+    LINKS.replace(
+        "{link_ref_json_schema}",
+        &schema_section(&schema::command_schema_json("links").expect("links schema exists")),
+    )
+}
+
+fn unresolved_links_manual() -> String {
+    UNRESOLVED_LINKS.replace(
+        "{link_ref_json_schema}",
+        &schema_section(
+            &schema::command_schema_json("unresolved-links")
+                .expect("unresolved-links schema exists"),
+        ),
+    )
+}
+
+fn graph_manual() -> String {
+    GRAPH.replace(
+        "{graph_json_schema}",
+        &schema_section(&schema::command_schema_json("graph").expect("graph schema exists")),
+    )
+}
+
+fn pipeline_manual() -> String {
+    PIPELINE
+        .replace(
+            "{pipeline_hits_json_schema}",
+            &schema_code_block(
+                &schema::command_schema_json("pipeline").expect("pipeline schema exists"),
+            ),
+        )
+        .replace(
+            "{pipeline_context_json_schema}",
+            &schema_code_block(
+                &schema::command_schema_json("pipeline --context")
+                    .expect("pipeline context schema exists"),
+            ),
+        )
+}
+
+fn status_manual() -> String {
+    STATUS.replace(
+        "{status_json_schema}",
+        &schema_section(&schema::command_schema_json("status").expect("status schema exists")),
+    )
+}
+
+fn json_schemas_manual() -> String {
+    format!(
+        "# JSON output schemas\n\nThese schemas are generated from the Rust output DTOs used by `--json`.\n\n{}\n\nFull schemas:\n```json\n{}\n```",
+        schema::compact_reference(),
+        schema::all_command_schemas_json()
+    )
 }
 
 const OVERVIEW: &str = r#"# mdq manual
@@ -91,6 +202,7 @@ Commands (see `mdq manual COMMAND` for each):
   graph        traverse resolved links in both directions
   pipeline     run filters and rankers in a supplied order
   status       index metadata and counts
+  json-schemas JSON schemas generated from Rust output types
 
 Query languages used by `query` and `pipeline` (see `mdq manual TOPIC`):
   native       generic frontmatter predicate language
@@ -119,6 +231,8 @@ Flags:
   --only embed     build only embeddings, skip the BM25 index
   --batch-size N   embedding batch size (default 64)
 
+{index_json_schema}
+
 The first run that builds embeddings downloads the multilingual-e5-small
 model (about 500 MB, cached under the OS cache directory). Re-running `index`
 only recomputes content that changed; embeddings are cached by content hash,
@@ -141,11 +255,24 @@ Flags:
                    path, heading label, and body text per result
   --verbose        include score and heading detail in the output
 
-JSON output schema (--json):
-  [{path: string, heading: string|null, score: number, text: string}, ...]
+{search_json_schema}
 
 `search` is a one-stage convenience over `pipeline` (`bm25+rag:QUERY` by
-default, or `bm25:QUERY` / `rag:QUERY` with `--only`)."#;
+default, or `bm25:QUERY` / `rag:QUERY` with `--only`).
+
+When to use:
+  Use `search` when you know terms or concepts but not exact metadata fields.
+  Use `query` when the answer depends on structured frontmatter, Tasks, Base,
+  or Dataview predicates.
+
+Examples:
+  mdq search "benchmark deterministic metrics" --only bm25 --json
+  mdq search "why did we choose the benchmark design" --only rag --json
+  mdq search "public key encryption" --limit 5 --max-chars 3000 --json
+
+Related manuals:
+  mdq manual pipeline
+  mdq manual query"#;
 
 const QUERY: &str = r#"# query command
 
@@ -176,10 +303,35 @@ structured RecordSet rows (see `mdq manual extensions`).
 
 JSON output schema (--json):
   native:
-    [{path: string, title: string|null}, ...]
+{query_native_json_schema}
   tasks, base, dataview, dataviewjs:
-    {kind: string, columns: string[], rows: object[],
-     diagnostics?: string[], summaries?: object}"#;
+{query_record_set_json_schema}
+
+Choosing a language:
+  native       simple frontmatter predicates over notes
+  tasks        checkbox task lines and Tasks-compatible filters
+  base         saved Obsidian Base YAML documents or Base YAML snippets
+  dataview     Dataview DQL page/task tables, lists, filters, sorts
+  dataviewjs   read-only DataviewJS snippets over serialized vault data
+
+Examples:
+  mdq query 'status = active and score >= 8' --json
+  mdq query 'not done
+due before today
+sort by due' --language tasks --json
+  mdq query 'filters: "status == \"active\""
+views:
+  - type: table
+    order: [file.path, status]' --language base --json
+  mdq query 'TABLE file.path, status FROM "Projects" WHERE status == "active"' --language dataview --json
+  mdq query 'dv.table(["path"], dv.pages("\"Projects\"").map(p => [p.file.path]))' --language dataviewjs --json
+
+Related manuals:
+  mdq manual native
+  mdq manual tasks
+  mdq manual base
+  mdq manual dataview
+  mdq manual dataviewjs"#;
 
 const BACKLINKS: &str = r#"# backlinks command
 
@@ -187,7 +339,26 @@ const BACKLINKS: &str = r#"# backlinks command
 
 Lists notes that link to NOTE through either a Wiki link or a Markdown link.
 Text output is one `source_path<TAB>raw_target` pair per line; `--json`
-returns the full structured link records."#;
+returns the full structured link records.
+
+NOTE may be a path (`People/Alice.md`) or a note-like target (`Alice`) that
+mdq can resolve through the indexed link resolver.
+
+{link_ref_json_schema}
+
+When to use:
+  Use `backlinks` when the question is about notes that refer to another note.
+  Use `links` for outgoing links from a note, and `graph` for multi-hop link
+  neighborhoods.
+
+Examples:
+  mdq backlinks People/Alice.md --json
+  mdq backlinks Alice --json
+
+Related manuals:
+  mdq manual links
+  mdq manual graph
+  mdq manual query"#;
 
 const LINKS: &str = r#"# links command
 
@@ -196,7 +367,22 @@ const LINKS: &str = r#"# links command
 Lists outgoing links from NOTE. Text output is one
 `raw_target<TAB>resolved_path<TAB>embed` row per line; an unresolved target
 prints `<unresolved>` in place of the resolved path. `--json` returns the
-full structured link records."#;
+full structured link records.
+
+{link_ref_json_schema}
+
+When to use:
+  Use `links` to inspect references made by a note. Use `backlinks` to inspect
+  notes that refer to a note.
+
+Examples:
+  mdq links Projects/Alpha.md --json
+  mdq links "Daily/2026-07-09.md" --json
+
+Related manuals:
+  mdq manual backlinks
+  mdq manual unresolved-links
+  mdq manual graph"#;
 
 const UNRESOLVED_LINKS: &str = r#"# unresolved-links command
 
@@ -205,7 +391,19 @@ const UNRESOLVED_LINKS: &str = r#"# unresolved-links command
 Lists vault-wide links that do not resolve to an indexed Markdown note or an
 existing non-Markdown vault file. Text output is one
 `source_path<TAB>raw_target<TAB>embed` row per line; `--json` returns the full
-structured link records."#;
+structured link records.
+
+{link_ref_json_schema}
+
+When to use:
+  Use `unresolved-links` to audit missing or misspelled link targets.
+
+Examples:
+  mdq unresolved-links --json
+
+Related manuals:
+  mdq manual links
+  mdq manual backlinks"#;
 
 const GRAPH: &str = r#"# graph command
 
@@ -213,7 +411,21 @@ const GRAPH: &str = r#"# graph command
 
 Traverses resolved links in both directions (outgoing links and backlinks)
 starting from NOTE, up to `--depth` hops (default 2), and returns every note
-reached, including NOTE itself."#;
+reached, including NOTE itself.
+
+When to use:
+  Use `graph` when link neighborhood matters more than a single incoming or
+  outgoing edge list.
+
+{graph_json_schema}
+
+Examples:
+  mdq graph Projects/Atlas.md --depth 1 --json
+  mdq graph Alice --depth 2 --json
+
+Related manuals:
+  mdq manual backlinks
+  mdq manual links"#;
 
 const PIPELINE: &str = r#"# pipeline command
 
@@ -239,7 +451,21 @@ Example:
     --stage 'bm25:cryptography' \
     --stage 'rag:public key research'
 
-`search` and native `query` are convenience commands over this pipeline."#;
+When to use:
+  Use `pipeline` when you want an explicit sequence such as structured filtering
+  followed by BM25 or RAG ranking.
+
+JSON output schema (--json):
+  without --context:
+{pipeline_hits_json_schema}
+  with --context:
+{pipeline_context_json_schema}
+
+`search` and native `query` are convenience commands over this pipeline.
+
+Related manuals:
+  mdq manual native
+  mdq manual search"#;
 
 const STATUS: &str = r#"# status command
 
@@ -249,13 +475,27 @@ Shows index metadata: vault path, `indexed_at` timestamp, note/chunk/link
 counts, `unresolved_links`, `embeddings` and `cached_embeddings` counts, and
 whether the index or embeddings are stale relative to the vault.
 `unresolved_links` excludes links to existing non-Markdown vault files such as
-Base documents and attachments."#;
+Base documents and attachments.
+
+When to use:
+  Use `status` before scripted runs to check whether an index exists, whether it
+  is stale, and whether embeddings are available.
+
+{status_json_schema}
+
+Examples:
+  mdq status
+  mdq status --json"#;
 
 const BASE: &str = r#"# Base-compatible query
 
 Input:
   mdq query --language base --file path/to/view.base
   mdq query --language base --file view.base --current Daily/2026-06-14.md
+  mdq query --language base 'filters: "status == \"active\""
+views:
+  - type: table
+    order: [file.path, status]'
 
 Supported document-level fields:
   filters          global filter applied before views
@@ -281,10 +521,34 @@ Named summary types (for views[0].summaries):
 `this.file` is available when `--current` is supplied. Formulas run multiple
 passes so later formulas may reference `formula.<name>` from earlier ones.
 
+When to use:
+  Use Base when you have a saved `.base` view, want YAML view configuration, or
+  need Base-compatible formulas, filters, sorting, grouping, or summaries.
+
+Examples:
+  mdq query --language base --file views/projects.base --json
+  mdq query --language base --file views/today.base --current Daily/2026-06-14.md --json
+  mdq query --language base 'filters: "score >= 8"
+views:
+  - type: table
+    order: [file.path, score]
+    sort:
+      - property: score
+        direction: DESC' --json
+
+Output:
+  Base returns a RecordSet with columns, rows, optional summaries, and
+  diagnostics. File metadata is available through `file.*`; frontmatter fields
+  are available by their property names.
+
 Compatibility limits:
   - Only the first view entry is executed.
   - Rendering configuration and column sizes are ignored.
-  - Link values are structured objects, not Obsidian UI wikilink objects."#;
+  - Link values are structured objects, not Obsidian UI wikilink objects.
+
+Related manuals:
+  mdq manual base-expr
+  mdq manual query"#;
 
 const DATAVIEW: &str = r#"# Dataview DQL-compatible query
 
@@ -298,12 +562,32 @@ Page rows expose arbitrary frontmatter plus:
 
 TASK queries operate on the same normalized task records as the Tasks adapter.
 
+When to use:
+  Use Dataview when you want DQL-style TABLE, LIST, TASK, or CALENDAR queries
+  over pages or tasks.
+
+Examples:
+  mdq query --language dataview 'TABLE file.path, status FROM "Projects" WHERE status == "active"' --json
+  mdq query --language dataview 'TABLE file.path, score FROM "Projects" WHERE score >= 8 SORT score DESC' --json
+  mdq query --language dataview 'TABLE file.path FROM "Projects" WHERE file.hasLink("People/Name.md")' --json
+  mdq query --language dataview 'TASK FROM "Projects" WHERE !completed LIMIT 20' --json
+
+Output:
+  Dataview returns a RecordSet. For TABLE queries, selected expressions become
+  columns. Page rows expose frontmatter plus the `file.*` object. TASK queries
+  expose normalized task fields.
+
 Current compatibility limits:
   - AND/OR source combinations are not yet interpreted.
   - GROUP BY emits rows containing `key` and grouped `rows`.
   - FLATTEN expands array values and accepts `FLATTEN EXPR AS NAME`.
   - Dataview's complete function library, durations, regex literals, and link
-    comparison semantics are only partially implemented."#;
+    comparison semantics are only partially implemented.
+
+Related manuals:
+  mdq manual dataview-expr
+  mdq manual tasks
+  mdq manual query"#;
 
 fn base_manual() -> String {
     [BASE, GENERATED_BASE_EXPR_MANUAL].join("\n\n")
@@ -346,7 +630,19 @@ Security boundary:
     restricts host access, not script capabilities within the vault data.
 
 Output-producing calls are captured as structured RecordSet rows. This is a
-CLI compatibility layer, not a browser or Obsidian renderer."#;
+CLI compatibility layer, not a browser or Obsidian renderer.
+
+When to use:
+  Use DataviewJS for read-only scripts that need mapping, grouping, or custom
+  output beyond DQL.
+
+Examples:
+  mdq query --language dataviewjs 'dv.list(dv.pages("\"Projects\"").map(p => p.file.path))' --json
+  mdq query --language dataviewjs 'dv.table(["path", "status"], dv.pages().map(p => [p.file.path, p.status]))' --json
+
+Related manuals:
+  mdq manual dataview
+  mdq manual query"#;
 
 const EXTENSIONS: &str = r#"# Extension API
 
@@ -460,5 +756,26 @@ mod tests {
             .join("\n");
 
         assert_eq!(render(Some(topic)).unwrap(), expected);
+    }
+
+    #[test]
+    fn command_manuals_include_generated_json_schemas() {
+        let graph = render(Some("graph")).unwrap();
+        assert!(graph.contains("\"title\": \"Array_of_NoteRef\""));
+        assert!(graph.contains("\"$ref\": \"#/$defs/NoteRef\""));
+        assert!(!graph.contains("nodes: object[]"));
+
+        let links = render(Some("links")).unwrap();
+        assert!(links.contains("\"title\": \"Array_of_LinkRef\""));
+        assert!(links.contains("\"resolved_path\""));
+
+        let status = render(Some("status")).unwrap();
+        assert!(status.contains("\"index_stale\""));
+        assert!(status.contains("\"embeddings_stale\""));
+
+        let all = render(Some("all")).unwrap();
+        assert!(!all.contains("{link_ref_json_schema}"));
+        assert!(!all.contains("{status_json_schema}"));
+        assert!(!all.contains("{pipeline_hits_json_schema}"));
     }
 }

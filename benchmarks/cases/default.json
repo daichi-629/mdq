@@ -1,0 +1,186 @@
+{
+  "people": ["Alice", "Alicia", "Alice-Old", "Bob", "Chika", "Diego", "Eve", "藤原"],
+  "anchor_projects": [
+    {
+      "index": 7,
+      "name": "Alicia",
+      "active": true,
+      "score": 10,
+      "status": "active",
+      "owner": "Alicia",
+      "priority": "high",
+      "due": "2026-07-20",
+      "risk": "medium"
+    },
+    {
+      "index": 13,
+      "name": "Legacy",
+      "active": true,
+      "score": 9,
+      "status": "active",
+      "owner": "Alice-Old",
+      "priority": "high",
+      "due": "2026-07-20",
+      "risk": "medium"
+    },
+    {
+      "index": 42,
+      "name": "Alpha",
+      "active": true,
+      "score": 9,
+      "status": "active",
+      "owner": "Alice",
+      "priority": "high",
+      "due": "2026-07-15",
+      "risk": "high"
+    },
+    {
+      "index": 77,
+      "name": "Zeta",
+      "active": true,
+      "score": 10,
+      "status": "active",
+      "owner": "Bob",
+      "priority": "medium",
+      "due": "2026-07-22",
+      "risk": "high"
+    },
+    {
+      "index": 88,
+      "name": "Paused",
+      "active": false,
+      "score": 10,
+      "status": "paused",
+      "owner": "Alice",
+      "priority": "high",
+      "due": "2026-07-15",
+      "risk": "high"
+    },
+    {
+      "index": 118,
+      "name": "Gamma",
+      "active": true,
+      "score": 8,
+      "status": "active",
+      "owner": "Alice",
+      "priority": "high",
+      "risk": "low"
+    }
+  ],
+  "decision_meeting": {
+    "index": 3,
+    "date": "2026-07-03",
+    "title": "benchmark",
+    "conclusion": "The team chose deterministic work metrics because wall-clock latency is too noisy for agent utility claims."
+  },
+  "tasks": [
+    {
+      "id": "active_high_score_alice",
+      "type": "frontmatter_link",
+      "question": "active かつ score >= 8 で Alice にリンクしている project をすべて答えて",
+      "expected_paths_from": {
+        "collection": "projects",
+        "where": {
+          "active": true,
+          "score_gte": 8,
+          "owner": "Alice"
+        }
+      }
+    },
+    {
+      "id": "due_open_task",
+      "type": "tasks",
+      "question": "2026-07-15 が due の未完了 high priority task を持つ note を答えて",
+      "expected_paths_from": {
+        "collection": "projects",
+        "where": {
+          "due": "2026-07-15",
+          "priority": "high"
+        }
+      }
+    },
+    {
+      "id": "decision_reason",
+      "type": "reasoning",
+      "question": "benchmark design の採用理由が書かれた meeting note を探し、その結論を一文で答えて",
+      "expected_paths_from": {
+        "collection": "meetings",
+        "where": {
+          "decision": true
+        }
+      },
+      "expected_answer_from": {
+        "collection": "meetings",
+        "where": {
+          "decision": true
+        },
+        "field": "conclusion"
+      }
+    },
+    {
+      "id": "alicia_owner_disambiguation",
+      "type": "frontmatter_link",
+      "question": "owner が Alice ではなく Alicia で、active かつ score >= 8 の project を答えて",
+      "expected_paths_from": {
+        "collection": "projects",
+        "where": {
+          "active": true,
+          "score_gte": 8,
+          "owner": "Alicia"
+        }
+      }
+    },
+    {
+      "id": "alice_old_owner_disambiguation",
+      "type": "frontmatter_link",
+      "question": "owner が Alice-Old で、active かつ score >= 8 の project を答えて",
+      "expected_paths_from": {
+        "collection": "projects",
+        "where": {
+          "active": true,
+          "score_gte": 8,
+          "owner": "Alice-Old"
+        }
+      }
+    },
+    {
+      "id": "active_high_risk_projects",
+      "type": "frontmatter_nested",
+      "question": "active で nested.risk が high の project をすべて答えて",
+      "expected_paths_from": {
+        "collection": "projects",
+        "where": {
+          "active": true,
+          "nested.risk": "high"
+        }
+      }
+    },
+    {
+      "id": "alice_active_due_high_risk",
+      "type": "frontmatter_link_task_nested",
+      "question": "Alice にリンクしている active project のうち、score >= 8、nested.risk = high、かつ 2026-07-15 due の未完了 high priority task を持つ note をすべて答えて",
+      "expected_paths_from": {
+        "collection": "projects",
+        "where": {
+          "active": true,
+          "score_gte": 8,
+          "owner": "Alice",
+          "nested.risk": "high",
+          "due": "2026-07-15",
+          "priority": "high"
+        }
+      }
+    },
+    {
+      "id": "unicode_person_note",
+      "type": "unicode_lookup",
+      "question": "藤原という person note のパスを答えて",
+      "expected_paths_from": {
+        "collection": "people",
+        "where": {
+          "name": "藤原"
+        }
+      }
+    }
+  ]
+}

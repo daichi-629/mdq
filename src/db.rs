@@ -1093,7 +1093,7 @@ pub struct IndexStats {
     pub links: usize,
 }
 
-#[derive(serde::Serialize)]
+#[derive(schemars::JsonSchema, serde::Serialize)]
 pub struct Status {
     pub vault: Option<String>,
     pub indexed_at: Option<String>,

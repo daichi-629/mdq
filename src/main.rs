@@ -8,7 +8,7 @@ use mdq::compat::CompatibilityEngine;
 use mdq::core::{QueryContext, RecordSet};
 use mdq::db::{Database, default_db_path};
 use mdq::manual;
-use mdq::model::{NoteRef, SearchHit};
+use mdq::model::{ContextItem, IndexOutput, NoteRef, SearchHit};
 use mdq::pipeline::{PipelineEngine, StageSpec};
 use mdq::semantic;
 use regex::Regex;
@@ -195,15 +195,15 @@ fn main() -> Result<()> {
                 .then(|| semantic::embed_missing(&mut database, batch_size))
                 .transpose()?;
             if cli.json {
-                print_json(&serde_json::json!({
-                    "vault": vault,
-                    "database": db_path,
-                    "notes": stats.as_ref().map(|stats| stats.notes),
-                    "chunks": stats.as_ref().map(|stats| stats.chunks),
-                    "links": stats.as_ref().map(|stats| stats.links),
-                    "embedded": embedded,
-                    "model": build_embed.then_some(semantic::MODEL_ID),
-                }))?;
+                print_json(&IndexOutput {
+                    vault: vault.to_string_lossy().into_owned(),
+                    database: db_path.to_string_lossy().into_owned(),
+                    notes: stats.as_ref().map(|stats| stats.notes),
+                    chunks: stats.as_ref().map(|stats| stats.chunks),
+                    links: stats.as_ref().map(|stats| stats.links),
+                    embedded,
+                    model: build_embed.then_some(semantic::MODEL_ID),
+                })?;
             } else {
                 if let Some(stats) = &stats {
                     println!(
@@ -604,14 +604,6 @@ fn traverse_graph(database: &Database, start: &str, depth: usize) -> Result<Vec<
         }
     }
     Ok(result)
-}
-
-#[derive(Serialize)]
-struct ContextItem {
-    path: String,
-    heading: Option<String>,
-    score: f64,
-    text: String,
 }
 
 fn build_context(
