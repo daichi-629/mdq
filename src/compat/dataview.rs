@@ -12,7 +12,7 @@ use serde_json::{Value, json};
 use crate::core::{QueryAdapter, QueryContext, RecordSet, Row};
 use crate::script::{QuickJsEngine, ScriptEngine};
 
-use super::expr::{Expr, value_order};
+use super::expr::{Expr, total_value_order};
 use super::tasks::collect_tasks;
 use super::{LinkIndex, page_value};
 
@@ -51,8 +51,7 @@ impl QueryAdapter for DataviewAdapter {
                     for sort in sorts.iter().rev() {
                         values.sort_by(|left, right| {
                             let ordering =
-                                value_order(&sort.expr.eval(left), &sort.expr.eval(right))
-                                    .unwrap_or(std::cmp::Ordering::Equal);
+                                total_value_order(&sort.expr.eval(left), &sort.expr.eval(right));
                             if sort.descending {
                                 ordering.reverse()
                             } else {
@@ -597,6 +596,9 @@ fn expand_views(context: &QueryContext<'_>, source: &str) -> Result<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::core::{QueryAdapter, QueryContext};
+    use crate::db::{Database, default_db_path};
+    use std::fs;
 
     #[test]
     fn parses_basic_dql() {
@@ -647,5 +649,53 @@ mod tests {
             query.operations.last(),
             Some(DqlOperation::Sort(sorts)) if sorts.len() == 2
         ));
+    }
+
+    #[test]
+    fn parses_uppercase_boolean_operators() {
+        let query = DqlQuery::parse(
+            "TABLE file.path FROM \"\" WHERE contains(file.name, \"Alpha\") OR file.name == \"Beta\"",
+        )
+        .unwrap();
+        assert!(matches!(
+            query.operations.as_slice(),
+            [DqlOperation::Where(_)]
+        ));
+    }
+
+    #[test]
+    fn sort_uses_total_order_for_mixed_values() {
+        let temp = tempfile::tempdir().unwrap();
+        let vault = temp.path().join("vault");
+        fs::create_dir_all(&vault).unwrap();
+        fs::write(
+            vault.join("インターン-a.md"),
+            "---\nmodified: 2026-07-10\n---\n# A\n",
+        )
+        .unwrap();
+        fs::write(
+            vault.join("インターン-b.md"),
+            "---\nmodified:\n  nested: true\n---\n# B\n",
+        )
+        .unwrap();
+        fs::write(vault.join("other.md"), "# Other\n").unwrap();
+
+        let db_path = default_db_path(&vault).unwrap();
+        let mut database = Database::open(&db_path).unwrap();
+        database.rebuild(&vault).unwrap();
+        let context = QueryContext {
+            database: &database,
+            vault: &vault,
+            current_file: None,
+        };
+
+        let result = DataviewAdapter
+            .execute(
+                &context,
+                "TABLE file.name, modified FROM \"\" WHERE contains(file.name, \"インターン\") SORT modified DESC",
+            )
+            .unwrap();
+
+        assert_eq!(result.rows.len(), 2);
     }
 }

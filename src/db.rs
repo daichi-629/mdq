@@ -17,8 +17,15 @@ pub struct Database {
 }
 
 fn configure_connection(connection: &Connection) -> Result<()> {
-    connection.busy_timeout(Duration::from_secs(30))?;
-    connection.execute_batch("PRAGMA foreign_keys = ON;")?;
+    connection.busy_timeout(Duration::from_secs(120))?;
+    connection.execute_batch(
+        "
+        PRAGMA busy_timeout = 120000;
+        PRAGMA foreign_keys = ON;
+        PRAGMA journal_mode = WAL;
+        PRAGMA synchronous = NORMAL;
+        ",
+    )?;
     Ok(())
 }
 
@@ -108,11 +115,8 @@ impl Database {
     }
 
     pub fn open_existing(path: &Path) -> Result<Self> {
-        let connection = Connection::open_with_flags(
-            path,
-            OpenFlags::SQLITE_OPEN_READ_WRITE,
-        )
-        .with_context(|| format!("failed to open existing index {}", path.display()))?;
+        let connection = Connection::open_with_flags(path, OpenFlags::SQLITE_OPEN_READ_WRITE)
+            .with_context(|| format!("failed to open existing index {}", path.display()))?;
         configure_connection(&connection)?;
         Ok(Self { connection })
     }

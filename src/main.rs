@@ -29,7 +29,7 @@ struct Cli {
 
     /// Maximum number of changed files/chunks to refresh automatically before
     /// running a search command. Larger drift requires an explicit `index` run.
-    #[arg(long, global = true, default_value_t = 20)]
+    #[arg(long, global = true, default_value_t = 500)]
     auto_threshold: usize,
 
     #[command(subcommand)]

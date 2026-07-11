@@ -67,10 +67,14 @@ impl Expr {
     }
 
     pub fn parse_dataview(source: &str) -> Result<Self> {
-        let pair = dataview_grammar::ExprParser::parse(dataview_grammar::Rule::expression, source)
-            .with_context(|| format!("invalid Dataview expression: {source}"))?
-            .next()
-            .context("empty expression")?;
+        let normalized = normalize_dataview_logical_operators(source);
+        let pair = dataview_grammar::ExprParser::parse(
+            dataview_grammar::Rule::expression,
+            normalized.as_str(),
+        )
+        .with_context(|| format!("invalid Dataview expression: {source}"))?
+        .next()
+        .context("empty expression")?;
         build(pair)
     }
 
@@ -113,6 +117,72 @@ impl Expr {
     }
 }
 
+fn normalize_dataview_logical_operators(source: &str) -> String {
+    let mut output = String::with_capacity(source.len());
+    let mut chars = source.char_indices().peekable();
+    let mut quote: Option<char> = None;
+    let mut escaped = false;
+    while let Some((index, ch)) = chars.next() {
+        if let Some(quote_char) = quote {
+            output.push(ch);
+            if escaped {
+                escaped = false;
+            } else if ch == '\\' {
+                escaped = true;
+            } else if ch == quote_char {
+                quote = None;
+            }
+            continue;
+        }
+        if ch == '\'' || ch == '"' {
+            quote = Some(ch);
+            output.push(ch);
+            continue;
+        }
+        if ch.is_ascii_alphabetic() {
+            let start = index;
+            let mut end = index + ch.len_utf8();
+            while let Some((next_index, next)) = chars.peek().copied() {
+                if !next.is_ascii_alphabetic() {
+                    break;
+                }
+                chars.next();
+                end = next_index + next.len_utf8();
+            }
+            let word = &source[start..end];
+            let prev = source[..start].chars().next_back();
+            let next = source[end..].chars().next();
+            let bounded = prev.is_none_or(|c| !dataview_identifier_char(c))
+                && next.is_none_or(|c| !dataview_identifier_char(c));
+            if bounded {
+                match word.to_ascii_lowercase().as_str() {
+                    "or" => {
+                        output.push_str("||");
+                        continue;
+                    }
+                    "and" => {
+                        output.push_str("&&");
+                        continue;
+                    }
+                    "not" => {
+                        output.push('!');
+                        continue;
+                    }
+                    _ => {}
+                }
+            }
+            output.push_str(word);
+            continue;
+        }
+        output.push(ch);
+    }
+    output
+}
+
+fn dataview_identifier_char(ch: char) -> bool {
+    ch.is_ascii_alphanumeric() || matches!(ch, '_' | '-' | '#') || !ch.is_ascii()
+}
+
 fn build<R: RuleType>(pair: Pair<'_, R>) -> Result<Expr> {
     match rule_name(pair.as_rule()).as_str() {
         "expression" | "primary" => build(pair.into_inner().next().context("empty node")?),
@@ -122,7 +192,7 @@ fn build<R: RuleType>(pair: Pair<'_, R>) -> Result<Expr> {
             let mut negated = false;
             let mut expression = None;
             for inner in pair.into_inner() {
-                if rule_is(inner.as_rule(), "NOT") {
+                if rule_is(inner.as_rule(), "NOT") || rule_is(inner.as_rule(), "not_operator") {
                     negated = !negated;
                 } else {
                     expression = Some(build(inner)?);
@@ -611,6 +681,25 @@ pub fn value_order(left: &Value, right: &Value) -> Option<Ordering> {
                 _ => None,
             }
         }
+    }
+}
+
+pub fn total_value_order(left: &Value, right: &Value) -> Ordering {
+    value_order(left, right).unwrap_or_else(|| {
+        value_rank(left)
+            .cmp(&value_rank(right))
+            .then_with(|| left.to_string().cmp(&right.to_string()))
+    })
+}
+
+fn value_rank(value: &Value) -> u8 {
+    match value {
+        Value::Null => 0,
+        Value::Bool(_) => 1,
+        Value::Number(_) => 2,
+        Value::String(_) => 3,
+        Value::Array(_) => 4,
+        Value::Object(_) => 5,
     }
 }
 

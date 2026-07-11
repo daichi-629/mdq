@@ -111,9 +111,9 @@ dql_rest = @{ ANY+ }
 int = @{ ASCII_DIGIT+ }
 
 expression = { SOI ~ or_expr ~ EOI }
-or_expr = { and_expr ~ (OR ~ and_expr)* }
-and_expr = { unary_expr ~ (AND ~ unary_expr)* }
-unary_expr = { NOT* ~ comparison }
+or_expr = { and_expr ~ (WHITESPACE* ~ or_operator ~ WHITESPACE* ~ and_expr)* }
+and_expr = { unary_expr ~ (WHITESPACE* ~ and_operator ~ WHITESPACE* ~ unary_expr)* }
+unary_expr = { (not_operator ~ WHITESPACE*)* ~ comparison }
 comparison = { sum ~ (operator ~ sum)? }
 sum = { product ~ (add_operator ~ product)* }
 add_operator = { "+" | "-" }
@@ -144,9 +144,9 @@ object_entry = { object_key ~ ":" ~ or_expr }
 object_key = { string | identifier }
 operator = { ">=" | "<=" | "!=" | "==" | "=" | ">" | "<" }
 identifier_char = _{ ASCII_ALPHANUMERIC | "_" | "-" | "#" | NON_ASCII }
-OR = _{ (^"or" ~ !identifier_char) | "||" }
-AND = _{ (^"and" ~ !identifier_char) | "&&" }
-NOT = { (^"not" ~ !identifier_char) | "!" }
+or_operator = _{ ((("o" | "O") ~ ("r" | "R")) ~ !identifier_char) | "||" }
+and_operator = _{ ((("a" | "A") ~ ("n" | "N") ~ ("d" | "D")) ~ !identifier_char) | "&&" }
+not_operator = { ((("n" | "N") ~ ("o" | "O") ~ ("t" | "T")) ~ !identifier_char) | "!" }
 boolean = { (^"true" | ^"false") ~ !identifier_char }
 null = { ^"null" ~ !identifier_char }
 number = @{ "-"? ~ ASCII_DIGIT+ ~ ("." ~ ASCII_DIGIT+)? }
