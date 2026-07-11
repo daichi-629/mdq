@@ -1,9 +1,10 @@
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
+use std::thread;
 use std::time::Duration;
 
 use anyhow::{Context, Result};
-use rusqlite::{Connection, OpenFlags, OptionalExtension, params};
+use rusqlite::{Connection, ErrorCode, OpenFlags, OptionalExtension, params};
 use sha2::{Digest, Sha256};
 use walkdir::{DirEntry, WalkDir};
 
@@ -29,12 +30,47 @@ fn configure_connection(connection: &Connection) -> Result<()> {
     Ok(())
 }
 
+/// Max attempts for [`retry_on_lock`]. `PRAGMA busy_timeout` already makes SQLite block
+/// and retry internally for up to 120s per statement, but a whole multi-statement
+/// operation (open-and-migrate, or a bulk write transaction) can still surface
+/// `SQLITE_BUSY`/`SQLITE_LOCKED` if another process holds the lock for longer than that,
+/// or if the failed statement was a `COMMIT` (which cannot simply be re-issued once the
+/// owning `Transaction` has been consumed). Retrying the whole operation with backoff
+/// covers that case.
+const LOCK_RETRY_ATTEMPTS: u32 = 5;
+
+fn is_lock_error(error: &rusqlite::Error) -> bool {
+    matches!(
+        error,
+        rusqlite::Error::SqliteFailure(inner, _)
+            if matches!(inner.code, ErrorCode::DatabaseBusy | ErrorCode::DatabaseLocked)
+    )
+}
+
+/// Retries `action` with exponential backoff while it fails with `SQLITE_BUSY` or
+/// `SQLITE_LOCKED`, to ride out contention from other `mdq` processes accessing the
+/// same index concurrently.
+fn retry_on_lock<T>(mut action: impl FnMut() -> rusqlite::Result<T>) -> rusqlite::Result<T> {
+    let mut delay = Duration::from_millis(50);
+    for attempt in 1..=LOCK_RETRY_ATTEMPTS {
+        match action() {
+            Ok(value) => return Ok(value),
+            Err(error) if attempt < LOCK_RETRY_ATTEMPTS && is_lock_error(&error) => {
+                thread::sleep(delay);
+                delay = (delay * 2).min(Duration::from_secs(2));
+            }
+            Err(error) => return Err(error),
+        }
+    }
+    unreachable!("loop always returns on the final attempt")
+}
+
 impl Database {
     pub fn open(path: &Path) -> Result<Self> {
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent)?;
         }
-        let connection = Connection::open(path)
+        let connection = retry_on_lock(|| Connection::open(path))
             .with_context(|| format!("failed to open index {}", path.display()))?;
         configure_connection(&connection)?;
         connection.execute_batch(
@@ -115,121 +151,44 @@ impl Database {
     }
 
     pub fn open_existing(path: &Path) -> Result<Self> {
-        let connection = Connection::open_with_flags(path, OpenFlags::SQLITE_OPEN_READ_WRITE)
-            .with_context(|| format!("failed to open existing index {}", path.display()))?;
+        let connection =
+            retry_on_lock(|| Connection::open_with_flags(path, OpenFlags::SQLITE_OPEN_READ_WRITE))
+                .with_context(|| format!("failed to open existing index {}", path.display()))?;
         configure_connection(&connection)?;
         Ok(Self { connection })
     }
 
     pub fn rebuild(&mut self, vault: &Path) -> Result<IndexStats> {
         let transaction = self.connection.transaction()?;
-        transaction.execute_batch(
-            "
-            DELETE FROM chunks_fts;
-            DELETE FROM links;
-            DELETE FROM chunks;
-            DELETE FROM notes;
-            ",
-        )?;
-
-        let files: Vec<PathBuf> = WalkDir::new(vault)
-            .follow_links(false)
-            .into_iter()
-            .filter_entry(visible_entry)
-            .filter_map(Result::ok)
-            .filter(|entry| entry.file_type().is_file())
-            .filter(|entry| {
-                entry
-                    .path()
-                    .extension()
-                    .is_some_and(|extension| extension.eq_ignore_ascii_case("md"))
-            })
-            .map(DirEntry::into_path)
-            .collect();
-
-        let mut chunk_count = 0;
-        let mut link_count = 0;
-        for file in &files {
-            let note = parse_note(vault, file)?;
-            transaction.execute(
-                "INSERT INTO notes(path, title, body, body_start_line, frontmatter_json, mtime, ctime, size, content_hash)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
-                params![
-                    note.path,
-                    note.title,
-                    note.body,
-                    note.body_start_line as i64,
-                    note.frontmatter.as_ref().map(serde_json::Value::to_string),
-                    note.mtime,
-                    note.ctime,
-                    note.size as i64,
-                    note.hash,
-                ],
-            )?;
-            let note_id = transaction.last_insert_rowid();
-            for chunk in note.chunks {
-                let searchable = format!(
-                    "{} {} {}",
-                    note.title,
-                    chunk.heading.as_deref().unwrap_or_default(),
-                    chunk.body
-                );
-                let search_text = index_text(&searchable);
-                let content_hash = hex::encode(Sha256::digest(searchable.as_bytes()));
-                transaction.execute(
-                    "INSERT INTO chunks(
-                        note_id, ordinal, heading, body, search_text, content_hash
-                     ) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
-                    params![
-                        note_id,
-                        chunk.ordinal as i64,
-                        chunk.heading,
-                        chunk.body,
-                        search_text,
-                        content_hash,
-                    ],
-                )?;
-                let chunk_id = transaction.last_insert_rowid();
-                transaction.execute(
-                    "INSERT INTO chunks_fts(rowid, search_text) VALUES (?1, ?2)",
-                    params![chunk_id, index_text(&searchable)],
-                )?;
-                chunk_count += 1;
-            }
-            for link in note.links {
-                transaction.execute(
-                    "INSERT INTO links(
-                        source_note_id, raw_target, normalized_target, heading, is_embed
-                     ) VALUES (?1, ?2, ?3, ?4, ?5)",
-                    params![
-                        note_id,
-                        link.raw_target,
-                        link.target,
-                        link.heading,
-                        link.is_embed,
-                    ],
-                )?;
-                link_count += 1;
-            }
-        }
-
-        resolve_links(&transaction)?;
-        transaction.execute(
-            "INSERT INTO metadata(key, value) VALUES ('vault', ?1)
-             ON CONFLICT(key) DO UPDATE SET value = excluded.value",
-            [canonical(vault)?.to_string_lossy().as_ref()],
-        )?;
-        transaction.execute(
-            "INSERT INTO metadata(key, value) VALUES ('indexed_at', strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
-             ON CONFLICT(key) DO UPDATE SET value = excluded.value",
-            [],
-        )?;
+        let stats = rebuild_in_transaction(&transaction, vault)?;
         transaction.commit()?;
-        Ok(IndexStats {
-            notes: files.len(),
-            chunks: chunk_count,
-            links: link_count,
-        })
+        Ok(stats)
+    }
+
+    /// Like [`rebuild`](Self::rebuild), but never waits for another process's write lock:
+    /// if a concurrent `mdq` process already holds it (e.g. it is refreshing the same
+    /// index), this returns `Ok(None)` immediately instead of blocking, so the caller can
+    /// decide to wait for that process to finish rather than contend with it.
+    pub fn try_rebuild(&mut self, vault: &Path) -> Result<Option<IndexStats>> {
+        self.connection.busy_timeout(Duration::ZERO)?;
+        let result = (|| -> Result<Option<IndexStats>> {
+            let transaction = match self
+                .connection
+                .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
+            {
+                Ok(transaction) => transaction,
+                Err(error) if is_lock_error(&error) => return Ok(None),
+                Err(error) => return Err(error.into()),
+            };
+            let stats = rebuild_in_transaction(&transaction, vault)?;
+            match transaction.commit() {
+                Ok(()) => Ok(Some(stats)),
+                Err(error) if is_lock_error(&error) => Ok(None),
+                Err(error) => Err(error.into()),
+            }
+        })();
+        self.connection.busy_timeout(Duration::from_secs(120))?;
+        result
     }
 
     pub fn search(&self, query: &str, limit: usize) -> Result<Vec<SearchHit>> {
@@ -869,6 +828,118 @@ fn ensure_column(
     Ok(())
 }
 
+fn rebuild_in_transaction(
+    transaction: &rusqlite::Transaction<'_>,
+    vault: &Path,
+) -> Result<IndexStats> {
+    transaction.execute_batch(
+        "
+        DELETE FROM chunks_fts;
+        DELETE FROM links;
+        DELETE FROM chunks;
+        DELETE FROM notes;
+        ",
+    )?;
+
+    let files: Vec<PathBuf> = WalkDir::new(vault)
+        .follow_links(false)
+        .into_iter()
+        .filter_entry(visible_entry)
+        .filter_map(Result::ok)
+        .filter(|entry| entry.file_type().is_file())
+        .filter(|entry| {
+            entry
+                .path()
+                .extension()
+                .is_some_and(|extension| extension.eq_ignore_ascii_case("md"))
+        })
+        .map(DirEntry::into_path)
+        .collect();
+
+    let mut chunk_count = 0;
+    let mut link_count = 0;
+    for file in &files {
+        let note = parse_note(vault, file)?;
+        transaction.execute(
+            "INSERT INTO notes(path, title, body, body_start_line, frontmatter_json, mtime, ctime, size, content_hash)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+            params![
+                note.path,
+                note.title,
+                note.body,
+                note.body_start_line as i64,
+                note.frontmatter.as_ref().map(serde_json::Value::to_string),
+                note.mtime,
+                note.ctime,
+                note.size as i64,
+                note.hash,
+            ],
+        )?;
+        let note_id = transaction.last_insert_rowid();
+        for chunk in note.chunks {
+            let searchable = format!(
+                "{} {} {}",
+                note.title,
+                chunk.heading.as_deref().unwrap_or_default(),
+                chunk.body
+            );
+            let search_text = index_text(&searchable);
+            let content_hash = hex::encode(Sha256::digest(searchable.as_bytes()));
+            transaction.execute(
+                "INSERT INTO chunks(
+                    note_id, ordinal, heading, body, search_text, content_hash
+                 ) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+                params![
+                    note_id,
+                    chunk.ordinal as i64,
+                    chunk.heading,
+                    chunk.body,
+                    search_text,
+                    content_hash,
+                ],
+            )?;
+            let chunk_id = transaction.last_insert_rowid();
+            transaction.execute(
+                "INSERT INTO chunks_fts(rowid, search_text) VALUES (?1, ?2)",
+                params![chunk_id, index_text(&searchable)],
+            )?;
+            chunk_count += 1;
+        }
+        for link in note.links {
+            transaction.execute(
+                "INSERT INTO links(
+                    source_note_id, raw_target, normalized_target, heading, is_embed
+                 ) VALUES (?1, ?2, ?3, ?4, ?5)",
+                params![
+                    note_id,
+                    link.raw_target,
+                    link.target,
+                    link.heading,
+                    link.is_embed,
+                ],
+            )?;
+            link_count += 1;
+        }
+    }
+
+    resolve_links(transaction)?;
+    transaction.execute(
+        "INSERT INTO metadata(key, value) VALUES ('vault', ?1)
+         ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+        [canonical(vault)?.to_string_lossy().as_ref()],
+    )?;
+    transaction.execute(
+        "INSERT INTO metadata(key, value) VALUES ('indexed_at', strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
+         ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+        [],
+    )?;
+    Ok(IndexStats {
+        notes: files.len(),
+        chunks: chunk_count,
+        links: link_count,
+    })
+}
+
 fn resolve_links(transaction: &rusqlite::Transaction<'_>) -> Result<()> {
     let mut by_path = HashMap::<String, Vec<i64>>::new();
     let mut by_title = HashMap::<String, Vec<i64>>::new();
@@ -1124,6 +1195,44 @@ mod tests {
         assert_eq!(links.len(), 1);
         let backlinks = database.backlinks("b/Alpha").unwrap();
         assert_eq!(backlinks.len(), 1);
+    }
+
+    #[test]
+    fn try_rebuild_returns_none_without_blocking_when_another_connection_holds_the_write_lock() {
+        let directory = tempfile::tempdir().unwrap();
+        let vault = directory.path().join("notes");
+        fs::create_dir_all(&vault).unwrap();
+        fs::write(vault.join("a.md"), "# A\n").unwrap();
+        let db_path = directory.path().join("index.sqlite3");
+
+        let mut database = Database::open(&db_path).unwrap();
+        database.rebuild(&vault).unwrap();
+
+        // A second connection holds the write lock, simulating a concurrent `mdq` process
+        // that is already refreshing the index.
+        let mut other = Connection::open(&db_path).unwrap();
+        configure_connection(&other).unwrap();
+        let holder = other
+            .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
+            .unwrap();
+
+        let started = std::time::Instant::now();
+        let result = database.try_rebuild(&vault).unwrap();
+        assert!(
+            result.is_none(),
+            "try_rebuild must not win a contended lock"
+        );
+        assert!(
+            started.elapsed() < Duration::from_secs(1),
+            "try_rebuild must not block waiting for the lock"
+        );
+
+        holder.rollback().unwrap();
+        let stats = database.try_rebuild(&vault).unwrap();
+        assert!(
+            stats.is_some(),
+            "try_rebuild must succeed once the lock is free"
+        );
     }
 
     #[test]

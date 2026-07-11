@@ -1,5 +1,6 @@
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::path::{Path, PathBuf};
+use std::time::Duration;
 
 use anyhow::{Context, Result, bail};
 use clap::{Parser, Subcommand, ValueEnum};
@@ -427,9 +428,18 @@ fn main() -> Result<()> {
     Ok(())
 }
 
+/// Bound on how many times [`ensure_index_fresh`] waits for a concurrent `mdq` process to
+/// finish refreshing the index before giving up.
+const MAX_LOCK_WAIT_ROUNDS: u32 = 8;
+
 /// Refreshes the BM25 index when the vault has drifted from it. A small drift on an
 /// already-indexed vault is refreshed automatically; a large or first-time drift requires
 /// an explicit `index` run, since that may mean the wrong vault or an unbuilt index.
+///
+/// If another `mdq` process is already refreshing the same index, this does not contend
+/// with it for the write lock: it waits (with randomized backoff, to avoid many processes
+/// retrying in lockstep) for that process to finish and re-checks staleness, only
+/// attempting the refresh itself if the index is still stale once the lock is free.
 fn ensure_index_fresh(database: &mut Database, vault: &Path, threshold: usize) -> Result<()> {
     if let Some(indexed) = database.indexed_vault()? {
         if indexed != vault.to_string_lossy().as_ref() {
@@ -440,20 +450,56 @@ fn ensure_index_fresh(database: &mut Database, vault: &Path, threshold: usize) -
             );
         }
     }
-    let changed = database.staleness(vault)?;
-    if changed == 0 {
-        return Ok(());
-    }
-    if database.has_index()? && changed <= threshold {
+
+    for round in 0..MAX_LOCK_WAIT_ROUNDS {
+        let changed = database.staleness(vault)?;
+        if changed == 0 {
+            return Ok(());
+        }
+        if !(database.has_index()? && changed <= threshold) {
+            bail!(
+                "index is stale ({changed} changed file(s)); run `mdq --vault {} index` to refresh",
+                vault.display()
+            );
+        }
+
         eprintln!("vault changed ({changed} file(s)); refreshing index automatically");
-        database.rebuild(vault)?;
-        Ok(())
-    } else {
-        bail!(
-            "index is stale ({changed} changed file(s)); run `mdq --vault {} index` to refresh",
-            vault.display()
-        )
+        match database.try_rebuild(vault)? {
+            Some(_) => return Ok(()),
+            None => {
+                let wait = jittered_wait(round);
+                eprintln!(
+                    "index is locked by another process refreshing it; waiting {:.1}s and re-checking",
+                    wait.as_secs_f64()
+                );
+                std::thread::sleep(wait);
+            }
+        }
     }
+
+    bail!(
+        "index is still locked by another process after waiting; run `mdq --vault {} index` to refresh once it is free",
+        vault.display()
+    )
+}
+
+/// Randomized, capped exponential backoff so that many `mdq` processes racing to refresh
+/// the same stale index don't all retry at the same moment.
+fn jittered_wait(round: u32) -> Duration {
+    let base_ms = 200u64.saturating_mul(1u64 << round.min(4));
+    let jitter_ms = random_below(base_ms / 2 + 1);
+    Duration::from_millis(base_ms + jitter_ms).min(Duration::from_secs(5))
+}
+
+/// A cheap, non-cryptographic random value in `[0, bound)`, without pulling in a `rand`
+/// dependency just for retry jitter.
+fn random_below(bound: u64) -> u64 {
+    use std::collections::hash_map::RandomState;
+    use std::hash::{BuildHasher, Hasher};
+    if bound == 0 {
+        return 0;
+    }
+    RandomState::new().build_hasher().finish() % bound
 }
 
 /// Refreshes embeddings when chunks are missing them, under the same threshold policy as
