@@ -11,6 +11,7 @@ use mdq::manual;
 use mdq::model::{NoteRef, SearchHit};
 use mdq::pipeline::{PipelineEngine, StageSpec};
 use mdq::semantic;
+use regex::Regex;
 use serde::Serialize;
 
 #[derive(Parser)]
@@ -68,9 +69,9 @@ enum Command {
         query: String,
         #[arg(short, long, default_value_t = 8)]
         limit: usize,
-        /// Exclude a note path or directory from search results. Can be repeated.
+        /// Exclude note paths matching this regex. Can be repeated.
         #[arg(long)]
-        exclude: Vec<PathBuf>,
+        exclude: Vec<String>,
         /// Total character budget for context output (default: unlimited).
         #[arg(long)]
         max_chars: Option<usize>,
@@ -241,7 +242,7 @@ fn main() -> Result<()> {
                 usize::MAX
             };
             let mut hits = run_alias(&pipeline, &database, stage, &query, fetch_limit)?;
-            exclude_hits(&mut hits, &vault, &exclude);
+            exclude_hits(&mut hits, &vault, &exclude)?;
             let context = build_context(&database, hits, limit, max_chars.unwrap_or(usize::MAX))?;
             if context.len() == limit {
                 eprintln!("note: showing top {limit} results; use --limit to see more");
@@ -678,46 +679,39 @@ fn run_alias(
     Ok(hits)
 }
 
-fn exclude_hits(hits: &mut Vec<SearchHit>, vault: &Path, excludes: &[PathBuf]) {
+fn exclude_hits(hits: &mut Vec<SearchHit>, vault: &Path, excludes: &[String]) -> Result<()> {
     if excludes.is_empty() {
-        return;
+        return Ok(());
     }
-    let patterns: Vec<String> = excludes
+    let patterns = excludes
         .iter()
-        .map(|exclude| normalize_exclude_path(vault, exclude))
-        .filter(|exclude| !exclude.is_empty())
-        .collect();
+        .filter(|exclude| !normalize_exclude_pattern(vault, exclude).is_empty())
+        .map(|exclude| compile_exclude_regex(vault, exclude))
+        .collect::<Result<Vec<_>>>()?;
     hits.retain(|hit| {
         !patterns
             .iter()
             .any(|pattern| path_matches_exclude(&hit.path, pattern))
     });
+    Ok(())
 }
 
-fn normalize_exclude_path(vault: &Path, exclude: &Path) -> String {
-    let relative = if exclude.is_absolute() {
-        exclude.strip_prefix(vault).unwrap_or(exclude)
-    } else {
-        exclude
-    };
-    let mut parts = Vec::new();
-    for component in relative.components() {
-        match component {
-            std::path::Component::Normal(part) => {
-                parts.push(part.to_string_lossy().into_owned());
-            }
-            std::path::Component::CurDir => {}
-            _ => {}
-        }
-    }
-    parts.join("/").trim_end_matches('/').to_owned()
+fn compile_exclude_regex(vault: &Path, exclude: &str) -> Result<Regex> {
+    let pattern = normalize_exclude_pattern(vault, exclude);
+    Regex::new(&pattern).with_context(|| format!("invalid --exclude regex: {exclude}"))
 }
 
-fn path_matches_exclude(path: &str, exclude: &str) -> bool {
-    path == exclude
-        || path
-            .strip_prefix(exclude)
-            .is_some_and(|rest| rest.starts_with('/'))
+fn normalize_exclude_pattern(vault: &Path, exclude: &str) -> String {
+    let vault = vault.to_string_lossy().replace('\\', "/");
+    let relative = exclude.strip_prefix(&vault).unwrap_or(exclude);
+    relative
+        .trim_start_matches('/')
+        .trim_end_matches('/')
+        .to_owned()
+}
+
+fn path_matches_exclude(path: &str, exclude: &Regex) -> bool {
+    exclude.is_match(path)
 }
 
 fn resolve_current_file(vault: &Path, path: PathBuf) -> Result<PathBuf> {
@@ -791,7 +785,7 @@ mod tests {
     }
 
     #[test]
-    fn exclude_hits_matches_files_and_directories() {
+    fn exclude_hits_matches_regexes_and_directory_spelling_variants() {
         let vault = PathBuf::from("/vault");
         let mut hits = vec![
             SearchHit {
@@ -818,18 +812,55 @@ mod tests {
                 score: 0.8,
                 snippet: String::new(),
             },
+            SearchHit {
+                chunk_id: 4,
+                path: "test/item.md".to_owned(),
+                title: "Test".to_owned(),
+                heading: None,
+                score: 0.7,
+                snippet: String::new(),
+            },
         ];
 
         exclude_hits(
             &mut hits,
             &vault,
             &[
-                PathBuf::from("archive"),
-                PathBuf::from("/vault/drafts/todo.md"),
+                "^archive/".to_owned(),
+                "/vault/drafts/.*\\.md$".to_owned(),
+                "test/".to_owned(),
             ],
-        );
+        )
+        .unwrap();
 
         let paths: Vec<&str> = hits.iter().map(|hit| hit.path.as_str()).collect();
         assert_eq!(paths, vec!["keep.md"]);
+    }
+
+    #[test]
+    fn exclude_regex_normalizes_directory_without_trailing_slash() {
+        let vault = PathBuf::from("/vault");
+        let mut hits = vec![SearchHit {
+            chunk_id: 1,
+            path: "test/item.md".to_owned(),
+            title: "Test".to_owned(),
+            heading: None,
+            score: 1.0,
+            snippet: String::new(),
+        }];
+
+        exclude_hits(&mut hits, &vault, &["test".to_owned()]).unwrap();
+
+        assert!(hits.is_empty());
+    }
+
+    #[test]
+    fn exclude_hits_reports_invalid_regex() {
+        let vault = PathBuf::from("/vault");
+        let mut hits = Vec::new();
+
+        let error = exclude_hits(&mut hits, &vault, &["[".to_owned()]).unwrap_err();
+
+        assert!(error.to_string().contains("invalid --exclude regex"));
     }
 }

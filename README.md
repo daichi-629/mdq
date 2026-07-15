@@ -42,7 +42,7 @@ mdq --vault ~/notes pipeline \
   --stage 'filter:created >= 2026-01-01 and labels contains research' \
   --stage 'bm25+rag:public key encryption'
 mdq --vault ~/notes search "lattice cryptography"
-mdq --vault ~/notes search "lattice cryptography" --exclude archive
+mdq --vault ~/notes search "lattice cryptography" --exclude '^archive/'
 mdq --vault ~/notes search "lattice cryptography" --only bm25
 mdq --vault ~/notes search "lattice cryptography" --only rag
 mdq --vault ~/notes search "lattice cryptography" --verbose
