@@ -68,6 +68,9 @@ enum Command {
         query: String,
         #[arg(short, long, default_value_t = 8)]
         limit: usize,
+        /// Exclude a note path or directory from search results. Can be repeated.
+        #[arg(long)]
+        exclude: Vec<PathBuf>,
         /// Total character budget for context output (default: unlimited).
         #[arg(long)]
         max_chars: Option<usize>,
@@ -216,6 +219,7 @@ fn main() -> Result<()> {
         Command::Search {
             query,
             limit,
+            exclude,
             max_chars,
             only,
             verbose,
@@ -231,7 +235,13 @@ fn main() -> Result<()> {
                 Some(SearchEngine::Rag) => ("rag", limit.saturating_mul(3).max(limit)),
                 None => ("bm25+rag", limit.saturating_mul(5).max(30)),
             };
-            let hits = run_alias(&pipeline, &database, stage, &query, fetch_limit)?;
+            let fetch_limit = if exclude.is_empty() {
+                fetch_limit
+            } else {
+                usize::MAX
+            };
+            let mut hits = run_alias(&pipeline, &database, stage, &query, fetch_limit)?;
+            exclude_hits(&mut hits, &vault, &exclude);
             let context = build_context(&database, hits, limit, max_chars.unwrap_or(usize::MAX))?;
             if context.len() == limit {
                 eprintln!("note: showing top {limit} results; use --limit to see more");
@@ -668,6 +678,48 @@ fn run_alias(
     Ok(hits)
 }
 
+fn exclude_hits(hits: &mut Vec<SearchHit>, vault: &Path, excludes: &[PathBuf]) {
+    if excludes.is_empty() {
+        return;
+    }
+    let patterns: Vec<String> = excludes
+        .iter()
+        .map(|exclude| normalize_exclude_path(vault, exclude))
+        .filter(|exclude| !exclude.is_empty())
+        .collect();
+    hits.retain(|hit| {
+        !patterns
+            .iter()
+            .any(|pattern| path_matches_exclude(&hit.path, pattern))
+    });
+}
+
+fn normalize_exclude_path(vault: &Path, exclude: &Path) -> String {
+    let relative = if exclude.is_absolute() {
+        exclude.strip_prefix(vault).unwrap_or(exclude)
+    } else {
+        exclude
+    };
+    let mut parts = Vec::new();
+    for component in relative.components() {
+        match component {
+            std::path::Component::Normal(part) => {
+                parts.push(part.to_string_lossy().into_owned());
+            }
+            std::path::Component::CurDir => {}
+            _ => {}
+        }
+    }
+    parts.join("/").trim_end_matches('/').to_owned()
+}
+
+fn path_matches_exclude(path: &str, exclude: &str) -> bool {
+    path == exclude
+        || path
+            .strip_prefix(exclude)
+            .is_some_and(|rest| rest.starts_with('/'))
+}
+
 fn resolve_current_file(vault: &Path, path: PathBuf) -> Result<PathBuf> {
     let resolved = if path.is_absolute() {
         path
@@ -736,5 +788,48 @@ mod tests {
 
         assert!(resolve_current_file(&vault, PathBuf::from("inside.md")).is_ok());
         assert!(resolve_current_file(&vault, PathBuf::from("../outside.md")).is_err());
+    }
+
+    #[test]
+    fn exclude_hits_matches_files_and_directories() {
+        let vault = PathBuf::from("/vault");
+        let mut hits = vec![
+            SearchHit {
+                chunk_id: 1,
+                path: "keep.md".to_owned(),
+                title: "Keep".to_owned(),
+                heading: None,
+                score: 1.0,
+                snippet: String::new(),
+            },
+            SearchHit {
+                chunk_id: 2,
+                path: "archive/old.md".to_owned(),
+                title: "Old".to_owned(),
+                heading: None,
+                score: 0.9,
+                snippet: String::new(),
+            },
+            SearchHit {
+                chunk_id: 3,
+                path: "drafts/todo.md".to_owned(),
+                title: "Todo".to_owned(),
+                heading: None,
+                score: 0.8,
+                snippet: String::new(),
+            },
+        ];
+
+        exclude_hits(
+            &mut hits,
+            &vault,
+            &[
+                PathBuf::from("archive"),
+                PathBuf::from("/vault/drafts/todo.md"),
+            ],
+        );
+
+        let paths: Vec<&str> = hits.iter().map(|hit| hit.path.as_str()).collect();
+        assert_eq!(paths, vec!["keep.md"]);
     }
 }

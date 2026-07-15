@@ -127,7 +127,7 @@ so an unchanged chunk is never re-embedded."#;
 const SEARCH: &str = r#"# search command
 
   mdq --vault PATH search QUERY [--only bm25|rag] [--limit N]
-    [--max-chars N] [--verbose]
+    [--exclude PATH] [--max-chars N] [--verbose]
 
 Retrieves ranked source context for QUERY. Hybrid BM25 + semantic (RRF) by
 default.
@@ -136,6 +136,7 @@ Flags:
   --only bm25      BM25 full-text retrieval only
   --only rag       semantic embedding retrieval only
   --limit N        maximum results (default 8)
+  --exclude PATH   exclude a note path or directory from results; repeatable
   --max-chars N    total context character budget (default: unlimited); counts
                    path, heading label, and body text per result
   --verbose        include score and heading detail in the output
