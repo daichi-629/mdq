@@ -1,6 +1,7 @@
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
+use schemars::JsonSchema;
 use serde::Serialize;
 use serde_json::Value;
 
@@ -8,15 +9,17 @@ use crate::db::Database;
 
 pub type Row = BTreeMap<String, Value>;
 
-#[derive(Clone, Debug, Default, Serialize)]
+#[derive(Clone, Debug, Default, Serialize, JsonSchema)]
 pub struct RecordSet {
     pub kind: String,
     pub columns: Vec<String>,
     pub rows: Vec<Row>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
+    #[schemars(default)]
     pub diagnostics: Vec<String>,
     /// Per-property aggregate values from a Base view's `summaries` mapping.
     #[serde(skip_serializing_if = "Row::is_empty")]
+    #[schemars(default)]
     pub summaries: Row,
 }
 

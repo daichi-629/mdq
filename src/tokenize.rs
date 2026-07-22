@@ -51,7 +51,7 @@ pub fn fts_query(text: &str) -> String {
         .into_iter()
         .map(|token| format!("\"{}\"", token.replace('"', "\"\"")))
         .collect::<Vec<_>>()
-        .join(" AND ")
+        .join(" OR ")
 }
 
 fn is_cjk(character: char) -> bool {
@@ -77,5 +77,20 @@ mod tests {
     #[test]
     fn tokenizes_latin_words_case_insensitively() {
         assert_eq!(search_tokens("Rust CLI"), vec!["rust", "cli"]);
+    }
+
+    #[test]
+    fn fts_query_joins_tokens_with_or() {
+        assert_eq!(fts_query("benchmark design"), "\"benchmark\" OR \"design\"");
+    }
+
+    #[test]
+    fn fts_query_single_token() {
+        assert_eq!(fts_query("benchmark"), "\"benchmark\"");
+    }
+
+    #[test]
+    fn fts_query_escapes_quotes() {
+        assert_eq!(fts_query("hello\"world"), "\"hello\" OR \"world\"");
     }
 }

@@ -121,7 +121,8 @@ product = { postfix ~ (mul_operator ~ postfix)* }
 mul_operator = { "*" | "/" | "%" }
 postfix = { primary ~ (method_call | field_call | index_call)* }
 primary = {
-    function_call
+    lambda
+  | function_call
   | object
   | list
   | regex
@@ -133,6 +134,8 @@ primary = {
   | identifier
   | "(" ~ or_expr ~ ")"
 }
+lambda = { lambda_params ~ "=>" ~ or_expr }
+lambda_params = { "(" ~ (identifier ~ ("," ~ identifier)*)? ~ ")" }
 function_call = { identifier ~ "(" ~ arguments? ~ ")" }
 method_call = { "." ~ identifier ~ "(" ~ arguments? ~ ")" }
 field_call = { "." ~ identifier }

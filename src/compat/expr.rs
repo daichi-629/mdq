@@ -38,6 +38,7 @@ pub enum Expr {
     Method(Box<Expr>, String, Vec<Expr>),
     Not(Box<Expr>),
     Binary(Box<Expr>, Op, Box<Expr>),
+    Lambda(Vec<String>, Box<Expr>),
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -109,6 +110,10 @@ impl Expr {
             }
             Self::Call(name, args) => call(name, args, row),
             Self::Method(target, name, args) => method(target.eval(row), name, args, row),
+            Self::Lambda(_, _) => {
+                // Lambdas should only be used as arguments to higher-order functions
+                Value::Null
+            }
         }
     }
 
@@ -344,9 +349,20 @@ fn build<R: RuleType>(pair: Pair<'_, R>) -> Result<Expr> {
         }
         "date_literal" => Ok(Expr::Literal(Value::String(pair.as_str().to_owned()))),
         "boolean" => Ok(Expr::Literal(Value::Bool(
-            pair.as_str().eq_ignore_ascii_case("true"),
+            pair.as_str().trim().eq_ignore_ascii_case("true"),
         ))),
         "null" => Ok(Expr::Literal(Value::Null)),
+        "lambda" => {
+            let mut inner = pair.into_inner();
+            let params_pair = inner.next().context("lambda missing params")?;
+            let params = params_pair
+                .into_inner()
+                .map(|ident| ident.as_str().to_owned())
+                .collect();
+            let body_expr = build(inner.next().context("lambda missing body")?)?;
+            Ok(Expr::Lambda(params, Box::new(body_expr)))
+        }
+        "lambda_params" => bail!("lambda_params must be handled by lambda rule"),
         rule => bail!("unexpected expression rule: {rule}"),
     }
 }
@@ -1118,6 +1134,126 @@ fn call(name: &str, args: &[Expr], row: &Value) -> Value {
                 })
                 .unwrap_or(Value::Null)
         }
+        // Lambda-taking collection functions
+        "filter" => {
+            let array = args.first().map(|arg| arg.eval(row)).unwrap_or(Value::Null);
+            if let (Some(items), Some(predicate)) = (array.as_array(), args.get(1)) {
+                Value::Array(
+                    items
+                        .iter()
+                        .filter(|item| truthy(&apply_lambda(predicate, &[(*item).clone()], row)))
+                        .cloned()
+                        .collect(),
+                )
+            } else {
+                Value::Null
+            }
+        }
+        "map" => {
+            let array = args.first().map(|arg| arg.eval(row)).unwrap_or(Value::Null);
+            if let (Some(items), Some(transformer)) = (array.as_array(), args.get(1)) {
+                Value::Array(
+                    items
+                        .iter()
+                        .map(|item| apply_lambda(transformer, &[(*item).clone()], row))
+                        .collect(),
+                )
+            } else {
+                Value::Null
+            }
+        }
+        "any" => {
+            let array = args.first().map(|arg| arg.eval(row)).unwrap_or(Value::Null);
+            if let Some(items) = array.as_array() {
+                if let Some(predicate) = args.get(1) {
+                    // With predicate
+                    Value::Bool(
+                        items
+                            .iter()
+                            .any(|item| truthy(&apply_lambda(predicate, &[(*item).clone()], row))),
+                    )
+                } else {
+                    // Without predicate - check if any element is truthy
+                    Value::Bool(items.iter().any(truthy))
+                }
+            } else {
+                Value::Bool(false)
+            }
+        }
+        "all" => {
+            let array = args.first().map(|arg| arg.eval(row)).unwrap_or(Value::Null);
+            if let Some(items) = array.as_array() {
+                if let Some(predicate) = args.get(1) {
+                    // With predicate
+                    Value::Bool(
+                        items
+                            .iter()
+                            .all(|item| truthy(&apply_lambda(predicate, &[(*item).clone()], row))),
+                    )
+                } else {
+                    // Without predicate - check if all elements are truthy
+                    Value::Bool(items.iter().all(truthy))
+                }
+            } else {
+                Value::Bool(true)
+            }
+        }
+        "none" => {
+            let array = args.first().map(|arg| arg.eval(row)).unwrap_or(Value::Null);
+            if let Some(items) = array.as_array() {
+                if let Some(predicate) = args.get(1) {
+                    // With predicate
+                    Value::Bool(
+                        items
+                            .iter()
+                            .all(|item| !truthy(&apply_lambda(predicate, &[(*item).clone()], row))),
+                    )
+                } else {
+                    // Without predicate - check if no elements are truthy
+                    Value::Bool(items.iter().all(|v| !truthy(v)))
+                }
+            } else {
+                Value::Bool(true)
+            }
+        }
+        "minby" => {
+            let array = args.first().map(|arg| arg.eval(row)).unwrap_or(Value::Null);
+            if let (Some(items), Some(key_fn)) = (array.as_array(), args.get(1)) {
+                if items.is_empty() {
+                    return Value::Null;
+                }
+                items
+                    .iter()
+                    .min_by(|a, b| {
+                        let key_a = apply_lambda(key_fn, &[(**a).clone()], row);
+                        let key_b = apply_lambda(key_fn, &[(**b).clone()], row);
+                        value_order(&key_a, &key_b).unwrap_or(Ordering::Equal)
+                    })
+                    .cloned()
+                    .unwrap_or(Value::Null)
+            } else {
+                Value::Null
+            }
+        }
+        "maxby" => {
+            let array = args.first().map(|arg| arg.eval(row)).unwrap_or(Value::Null);
+            if let (Some(items), Some(key_fn)) = (array.as_array(), args.get(1)) {
+                if items.is_empty() {
+                    return Value::Null;
+                }
+                items
+                    .iter()
+                    .max_by(|a, b| {
+                        let key_a = apply_lambda(key_fn, &[(*a).clone()], row);
+                        let key_b = apply_lambda(key_fn, &[(*b).clone()], row);
+                        value_order(&key_a, &key_b).unwrap_or(Ordering::Equal)
+                    })
+                    .cloned()
+                    .unwrap_or(Value::Null)
+            } else {
+                Value::Null
+            }
+        }
         _ => Value::Null,
     }
 }
@@ -1142,6 +1278,24 @@ fn with_bindings(row: &Value, bindings: &[(&str, Value)]) -> Value {
         map.insert((*key).to_owned(), value.clone());
     }
     Value::Object(map)
+}
+
+/// Apply a lambda expression with given argument values
+fn apply_lambda(lambda: &Expr, args: &[Value], row: &Value) -> Value {
+    if let Expr::Lambda(param_names, body) = lambda {
+        if param_names.len() != args.len() {
+            return Value::Null;
+        }
+        let mut bindings = Vec::new();
+        for (name, value) in param_names.iter().zip(args.iter()) {
+            bindings.push((name.as_str(), value.clone()));
+        }
+        let scope = with_bindings(row, &bindings);
+        body.eval(&scope)
+    } else {
+        // Not a lambda, treat as regular expression
+        lambda.eval(row)
+    }
 }
 
 fn list_filter(items: &[Value], expr: &Expr, row: &Value) -> Value {
@@ -1700,4 +1854,157 @@ fn method(target: Value, name: &str, args: &[Expr], row: &Value) -> Value {
         _ => None,
     };
     result.unwrap_or(Value::Null)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    fn make_row(pairs: &[(&str, Value)]) -> Value {
+        let mut map = serde_json::Map::new();
+        for (key, value) in pairs {
+            map.insert(key.to_string(), value.clone());
+        }
+        Value::Object(map)
+    }
+
+    #[test]
+    fn test_lambda_parse_single_param() {
+        let expr = Expr::parse_dataview("(x) => x + 1").expect("should parse lambda");
+        if let Expr::Lambda(params, _) = expr {
+            assert_eq!(params.len(), 1);
+            assert_eq!(params[0], "x");
+        } else {
+            panic!("Expected Lambda expression");
+        }
+    }
+
+    #[test]
+    fn test_lambda_parse_multiple_params() {
+        let expr = Expr::parse_dataview("(x, y) => x + y").expect("should parse lambda");
+        if let Expr::Lambda(params, _) = expr {
+            assert_eq!(params.len(), 2);
+            assert_eq!(params[0], "x");
+            assert_eq!(params[1], "y");
+        } else {
+            panic!("Expected Lambda expression");
+        }
+    }
+
+    #[test]
+    fn test_filter_with_lambda() {
+        let expr = Expr::parse_dataview("filter([1, 2, 3, 4, 5], (x) => x > 2)")
+            .expect("should parse filter with lambda");
+        let row = make_row(&[]);
+        let result = expr.eval(&row);
+        assert_eq!(result, json!([3.0, 4.0, 5.0]));
+    }
+
+    #[test]
+    fn test_map_with_lambda() {
+        let expr = Expr::parse_dataview("map([1, 2, 3], (x) => x * 2)")
+            .expect("should parse map with lambda");
+        let row = make_row(&[]);
+        let result = expr.eval(&row);
+        assert_eq!(result, json!([2.0, 4.0, 6.0]));
+    }
+
+    #[test]
+    fn test_any_with_lambda() {
+        let expr = Expr::parse_dataview("any([1, 2, 3], (x) => x > 2)")
+            .expect("should parse any with lambda");
+        let row = make_row(&[]);
+        let result = expr.eval(&row);
+        assert_eq!(result, Value::Bool(true));
+    }
+
+    #[test]
+    fn test_any_without_lambda() {
+        let expr = Expr::parse_dataview("any([false, false, true])")
+            .expect("should parse any without lambda");
+        let row = make_row(&[]);
+        let result = expr.eval(&row);
+        assert_eq!(result, Value::Bool(true));
+    }
+
+    #[test]
+    fn test_all_with_lambda() {
+        let expr = Expr::parse_dataview("all([1, 2, 3], (x) => x > 0)")
+            .expect("should parse all with lambda");
+        let row = make_row(&[]);
+        let result = expr.eval(&row);
+        assert_eq!(result, Value::Bool(true));
+    }
+
+    #[test]
+    fn test_all_without_lambda() {
+        let expr = Expr::parse_dataview("all([true, true, false])")
+            .expect("should parse all without lambda");
+        let row = make_row(&[]);
+        let result = expr.eval(&row);
+        assert_eq!(result, Value::Bool(false));
+    }
+
+    #[test]
+    fn test_none_with_lambda() {
+        let expr = Expr::parse_dataview("none([1, 2, 3], (x) => x > 10)")
+            .expect("should parse none with lambda");
+        let row = make_row(&[]);
+        let result = expr.eval(&row);
+        assert_eq!(result, Value::Bool(true));
+    }
+
+    #[test]
+    fn test_minby_with_lambda() {
+        let expr = Expr::parse_dataview("minby([{val: 3}, {val: 1}, {val: 2}], (x) => x.val)")
+            .expect("should parse minby with lambda");
+        let row = make_row(&[]);
+        let result = expr.eval(&row);
+        assert_eq!(result, json!({"val": 1.0}));
+    }
+
+    #[test]
+    fn test_maxby_with_lambda() {
+        let expr = Expr::parse_dataview("maxby([{val: 3}, {val: 1}, {val: 2}], (x) => x.val)")
+            .expect("should parse maxby with lambda");
+        let row = make_row(&[]);
+        let result = expr.eval(&row);
+        assert_eq!(result, json!({"val": 3.0}));
+    }
+
+    #[test]
+    fn test_lambda_with_field_access() {
+        let expr = Expr::parse_dataview(
+            "filter([{completed: true}, {completed: false}], (t) => !t.completed)",
+        )
+        .expect("should parse filter with field access");
+        let row = make_row(&[]);
+        let result = expr.eval(&row);
+        assert_eq!(result, json!([{"completed": false}]));
+    }
+
+    #[test]
+    fn dataview_and_chain_keeps_comparison_boundaries() {
+        let expr = Expr::parse_dataview(
+            r#"owner = "Alice-Old" AND active = true AND score >= 8 AND type = "project""#,
+        )
+        .expect("should parse chained AND expression");
+
+        let matching = make_row(&[
+            ("owner", json!("Alice-Old")),
+            ("active", json!(true)),
+            ("score", json!(8)),
+            ("type", json!("project")),
+        ]);
+        let inactive = make_row(&[
+            ("owner", json!("Alice-Old")),
+            ("active", json!(false)),
+            ("score", json!(8)),
+            ("type", json!("project")),
+        ]);
+
+        assert!(expr.test(&matching), "{expr:#?}");
+        assert!(!expr.test(&inactive), "{expr:#?}");
+    }
 }

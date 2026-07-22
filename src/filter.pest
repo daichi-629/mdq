@@ -3,6 +3,15 @@
 // mdq-doc: Native queries operate on arbitrary YAML frontmatter. Dotted paths
 // mdq-doc: and array indices are structural only; no property name is reserved.
 // mdq-doc:
+// mdq-doc: Input:
+// mdq-doc:   mdq query 'status = active and score >= 8' --json
+// mdq-doc:   mdq pipeline --stage 'filter:status = active'
+// mdq-doc:
+// mdq-doc: When to use:
+// mdq-doc:   Use native queries for direct frontmatter predicates over notes.
+// mdq-doc:   Use Dataview or Base when you need table projection, source clauses,
+// mdq-doc:   grouping, summaries, or compatibility with saved Obsidian queries.
+// mdq-doc:
 // mdq-doc: Boolean syntax:
 // mdq-doc:   EXPR and EXPR
 // mdq-doc:   EXPR or EXPR
@@ -34,7 +43,14 @@
 // mdq-doc:   mdq query 'date >= 2026-01-01'
 // mdq-doc:   mdq query 'nested.key exists'
 // mdq-doc:
+// mdq-doc: Output:
+// mdq-doc:   Native queries return matching notes as `{path, title}` rows.
+// mdq-doc:
 // mdq-doc: This language is also available as `filter:` in retrieval pipelines.
+// mdq-doc:
+// mdq-doc: Related manuals:
+// mdq-doc:   mdq manual query
+// mdq-doc:   mdq manual pipeline
 
 WHITESPACE = _{ " " | "\t" | NEWLINE }
 

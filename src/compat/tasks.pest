@@ -6,6 +6,11 @@
 // mdq-doc:   sort by due
 // mdq-doc:   limit 20'
 // mdq-doc:
+// mdq-doc: When to use:
+// mdq-doc:   Use Tasks queries for Markdown checkbox task lines, task dates,
+// mdq-doc:   task priorities, task statuses, task dependencies, and Tasks-style
+// mdq-doc:   sorting or grouping. Use Dataview TASK for DQL-style task queries.
+// mdq-doc:
 // mdq-doc: Task extraction:
 // mdq-doc:   - Reads Markdown checkbox list items using `-`, `*`, `+`, `1.`, or `1)`:
 // mdq-doc:     `[ ]`, `[x]`, `[X]`, `[/]`, and `[-]`.
@@ -175,6 +180,15 @@
 // mdq-doc:     Tasks rows.
 // mdq-doc:
 // mdq-doc: Empty query: an empty source string applies no filters and returns all tasks.
+// mdq-doc:
+// mdq-doc: Output:
+// mdq-doc:   Tasks queries return a RecordSet with one row per matching task,
+// mdq-doc:   ordered columns, optional grouped rows, and diagnostics.
+// mdq-doc:
+// mdq-doc: Related manuals:
+// mdq-doc:   mdq manual query
+// mdq-doc:   mdq manual dataview
+// mdq-doc:   mdq manual dataviewjs
 
 SPACE = _{ " " | "\t" }
 NEWLINE = _{ "\r\n" | "\n" }

@@ -466,6 +466,30 @@ enum TaskGroup {
     Script(String),
 }
 
+fn format_diagnostic_with_hint(line: &str) -> String {
+    let diagnostic = format!("unsupported Tasks instruction: {line}");
+    let mut parts = line.split_whitespace();
+    let (Some(field), Some(relation)) = (parts.next(), parts.next()) else {
+        return diagnostic;
+    };
+    let date_fields = [
+        "due",
+        "scheduled",
+        "starts",
+        "start",
+        "done",
+        "created",
+        "cancelled",
+        "happens",
+    ];
+    if date_fields.contains(&field) && matches!(relation.to_lowercase().as_str(), "is" | "was") {
+        return format!(
+            "{diagnostic} (hint: use '{field} on <date>', '{field} before <date>', '{field} after <date>', or '{field} on or before/after <date>')"
+        );
+    }
+    diagnostic
+}
+
 impl TaskQuery {
     fn parse(source: &str) -> Result<Self> {
         let mut query = Self {
@@ -490,16 +514,14 @@ impl TaskQuery {
                         continue;
                     };
                     if apply_instruction(line_pair, &mut query).is_err() {
-                        query
-                            .diagnostics
-                            .push(format!("unsupported Tasks instruction: {line}"));
+                        let diagnostic = format_diagnostic_with_hint(line);
+                        query.diagnostics.push(diagnostic);
                         query.filters.push(TaskFilter::Never);
                     }
                 }
                 Err(_) => {
-                    query
-                        .diagnostics
-                        .push(format!("unsupported Tasks instruction: {line}"));
+                    let diagnostic = format_diagnostic_with_hint(line);
+                    query.diagnostics.push(diagnostic);
                     query.filters.push(TaskFilter::Never);
                 }
             }

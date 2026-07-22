@@ -902,6 +902,52 @@ fn tasks_reports_invalid_status_type_as_diagnostic() {
 }
 
 #[test]
+fn tasks_provides_hint_for_unsupported_date_filter_syntax() {
+    let (dir, db) = fixture();
+    let vault = dir.path().join("vault");
+    let ctx = context(&db, &vault, None);
+
+    let result = run_tasks(&ctx, "due is 2026-07-15");
+
+    assert!(result.rows.is_empty());
+    assert_eq!(result.diagnostics.len(), 1);
+    let diagnostic = &result.diagnostics[0];
+    assert!(diagnostic.contains("unsupported Tasks instruction: due is 2026-07-15"));
+    assert!(diagnostic.contains("hint:"));
+    assert!(diagnostic.contains("due on"));
+    assert!(diagnostic.contains("due before"));
+    assert!(diagnostic.contains("due after"));
+}
+
+#[test]
+fn tasks_parses_valid_date_filter_without_diagnostic() {
+    let (dir, db) = fixture();
+    let vault = dir.path().join("vault");
+    let ctx = context(&db, &vault, None);
+
+    let result = run_tasks(&ctx, "due on 2026-06-20");
+
+    assert!(!result.rows.is_empty());
+    assert!(result.diagnostics.is_empty());
+}
+
+#[test]
+fn tasks_provides_hint_for_other_date_fields_with_is() {
+    let (dir, db) = fixture();
+    let vault = dir.path().join("vault");
+    let ctx = context(&db, &vault, None);
+
+    let result = run_tasks(&ctx, "scheduled is 2026-06-15");
+
+    assert!(result.rows.is_empty());
+    assert_eq!(result.diagnostics.len(), 1);
+    let diagnostic = &result.diagnostics[0];
+    assert!(diagnostic.contains("unsupported Tasks instruction: scheduled is 2026-06-15"));
+    assert!(diagnostic.contains("hint:"));
+    assert!(diagnostic.contains("scheduled on"));
+}
+
+#[test]
 fn tasks_reports_function_filter_errors_as_diagnostics() {
     let (dir, db) = fixture();
     let vault = dir.path().join("vault");

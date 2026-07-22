@@ -710,6 +710,22 @@ impl Database {
         Ok((title_ids.len() == 1).then(|| title_ids[0]))
     }
 
+    /// Candidate paths for a note-like input. Exact resolution remains strict; this is
+    /// only diagnostic data for callers after resolution failed or was ambiguous.
+    pub fn note_candidates(&self, input: &str) -> Result<Vec<String>> {
+        let normalized = normalize_target(input);
+        let needle = normalized.rsplit('/').next().unwrap_or(&normalized);
+        let mut statement = self.connection.prepare(
+            "SELECT path FROM notes
+             WHERE lower(title) LIKE '%' || ?1 || '%'
+                OR lower(path) LIKE '%' || ?1 || '%'
+             ORDER BY path LIMIT 20",
+        )?;
+        let rows = statement.query_map([needle], |row| row.get(0))?;
+        rows.collect::<rusqlite::Result<Vec<_>>>()
+            .map_err(Into::into)
+    }
+
     fn unresolved_links_count(&self) -> Result<usize> {
         let file_index = self.non_note_file_index()?;
         let mut statement = self.connection.prepare(
@@ -1093,7 +1109,7 @@ pub struct IndexStats {
     pub links: usize,
 }
 
-#[derive(serde::Serialize)]
+#[derive(schemars::JsonSchema, serde::Serialize)]
 pub struct Status {
     pub vault: Option<String>,
     pub indexed_at: Option<String>,

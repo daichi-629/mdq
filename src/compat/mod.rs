@@ -23,8 +23,8 @@ pub struct CompatibilityEngine {
 }
 
 /// Vault-wide link lookup, grouped by source/target path, so building every
-/// page's `file.links` / `file.backlinks` / `file.embeds` only costs one
-/// query instead of one query per page.
+/// page's `file.links` / `file.backlinks` / `file.inlinks` / `file.outlinks`
+/// / `file.embeds` only costs one query instead of one query per page.
 pub(crate) struct LinkIndex {
     by_source: HashMap<String, Vec<Value>>,
     by_target: HashMap<String, Vec<Value>>,
@@ -76,11 +76,19 @@ impl LinkIndex {
         self.by_source.get(path).cloned().unwrap_or_default()
     }
 
+    fn outlinks_for(&self, path: &str) -> Vec<Value> {
+        self.links_for(path)
+    }
+
     fn embeds_for(&self, path: &str) -> Vec<Value> {
         self.links_for(path)
             .into_iter()
             .filter(|link| link.get("embed").and_then(Value::as_bool).unwrap_or(false))
             .collect()
+    }
+
+    fn inlinks_for(&self, path: &str) -> Vec<Value> {
+        self.backlinks_for(path)
     }
 
     fn backlinks_for(&self, path: &str) -> Vec<Value> {
@@ -140,6 +148,8 @@ fn page_value(page: &PageRecord, links: &LinkIndex) -> Value {
             "properties": normalized_metadata,
             "frontmatter": normalized_metadata,
             "links": links.links_for(&page.path),
+            "outlinks": links.outlinks_for(&page.path),
+            "inlinks": links.inlinks_for(&page.path),
             "embeds": links.embeds_for(&page.path),
             "backlinks": links.backlinks_for(&page.path),
         }),

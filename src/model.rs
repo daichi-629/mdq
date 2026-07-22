@@ -1,3 +1,4 @@
+use schemars::JsonSchema;
 use serde::Serialize;
 
 #[derive(Debug)]
@@ -30,9 +31,10 @@ pub struct ParsedLink {
     pub is_embed: bool,
 }
 
-#[derive(Clone, Debug, Serialize)]
+#[derive(Clone, Debug, Serialize, JsonSchema)]
 pub struct SearchHit {
     #[serde(skip)]
+    #[schemars(skip)]
     pub chunk_id: i64,
     pub path: String,
     pub title: String,
@@ -41,10 +43,19 @@ pub struct SearchHit {
     pub snippet: String,
 }
 
-#[derive(Clone, Debug, Serialize)]
+#[derive(Clone, Debug, Serialize, JsonSchema)]
 pub struct NoteRef {
     pub path: String,
     pub title: String,
+}
+
+#[derive(Debug, Serialize, JsonSchema)]
+pub struct GraphOutput {
+    pub direction: String,
+    /// Maximum hops, or null for an unlimited traversal.
+    pub depth: Option<usize>,
+    pub starts: Vec<NoteRef>,
+    pub notes: Vec<NoteRef>,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -59,7 +70,7 @@ pub struct PageRecord {
     pub size: u64,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, JsonSchema)]
 pub struct LinkRef {
     pub source: NoteRef,
     pub target: Option<NoteRef>,
@@ -73,4 +84,24 @@ pub struct LinkRef {
 pub struct EmbeddingInput {
     pub content_hash: String,
     pub text: String,
+}
+
+#[derive(Debug, Serialize, JsonSchema)]
+pub struct ContextItem {
+    pub path: String,
+    pub heading: Option<String>,
+    pub score: f64,
+    pub text: String,
+    pub match_reasons: Vec<String>,
+}
+
+#[derive(Debug, Serialize, JsonSchema)]
+pub struct IndexOutput {
+    pub vault: String,
+    pub database: String,
+    pub notes: Option<usize>,
+    pub chunks: Option<usize>,
+    pub links: Option<usize>,
+    pub embedded: Option<usize>,
+    pub model: Option<&'static str>,
 }

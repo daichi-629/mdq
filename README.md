@@ -58,7 +58,9 @@ mdq --vault ~/notes backlinks "Folder/Note"
 mdq --vault ~/notes links "Folder/Note"
 mdq --vault ~/notes unresolved-links
 mdq --vault ~/notes graph "Folder/Note" --depth 2
+mdq --vault ~/notes graph "Folder/Note" --direction outgoing --depth unlimited
 mdq --vault ~/notes status
+mdq quickref
 mdq manual
 mdq man search
 mdq man examples

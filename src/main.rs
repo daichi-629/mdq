@@ -8,7 +8,7 @@ use mdq::compat::CompatibilityEngine;
 use mdq::core::{QueryContext, RecordSet};
 use mdq::db::{Database, default_db_path};
 use mdq::manual;
-use mdq::model::{NoteRef, SearchHit};
+use mdq::model::{ContextItem, GraphOutput, IndexOutput, NoteRef, SearchHit};
 use mdq::pipeline::{PipelineEngine, StageSpec};
 use mdq::semantic;
 use regex::Regex;
@@ -54,8 +54,17 @@ enum SearchEngine {
     Rag,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq, ValueEnum)]
+enum GraphDirection {
+    Outgoing,
+    Incoming,
+    Both,
+}
+
 #[derive(Subcommand)]
 enum Command {
+    /// Show the compact, agent-oriented command reference.
+    Quickref,
     /// Build the BM25 index and local semantic embeddings.
     Index {
         /// Build only this target instead of both.
@@ -66,12 +75,16 @@ enum Command {
     },
     /// Retrieve source context for a query (default: hybrid BM25 + semantic).
     Search {
+        /// Search query. Queries with spaces must be quoted.
         query: String,
         #[arg(short, long, default_value_t = 8)]
         limit: usize,
         /// Exclude note paths matching this regex. Can be repeated.
         #[arg(long)]
         exclude: Vec<String>,
+        /// Include only note paths matching this regex. Can be repeated.
+        #[arg(long)]
+        path: Vec<String>,
         /// Total character budget for context output (default: unlimited).
         #[arg(long)]
         max_chars: Option<usize>,
@@ -84,7 +97,7 @@ enum Command {
     },
     /// Run a native, Tasks, Base, Dataview, or DataviewJS query.
     Query {
-        /// Inline query source. Use --file for .base files or longer scripts.
+        /// Inline query source. Use --file for .base files or longer scripts. Expressions with spaces or operators must be quoted: 'type = person'.
         expression: Option<String>,
         #[arg(long, default_value = "native")]
         language: String,
@@ -107,17 +120,21 @@ enum Command {
         #[arg(short, long, default_value_t = 100)]
         limit: usize,
     },
-    /// List notes linking to a note.
-    Backlinks { note: String },
     /// List links from a note.
     Links { note: String },
     /// List links that do not resolve to a vault note or file.
     UnresolvedLinks,
-    /// Traverse resolved links in both directions.
+    /// Traverse resolved links. `backlinks` is sugar for incoming depth 1.
+    #[command(visible_alias = "backlinks")]
     Graph {
-        note: String,
-        #[arg(long, default_value_t = 2)]
-        depth: usize,
+        /// One or more note paths, titles, or filenames to start from.
+        #[arg(required = true)]
+        notes: Vec<String>,
+        #[arg(long, value_enum, default_value_t = GraphDirection::Both)]
+        direction: GraphDirection,
+        /// Maximum hops, or `unlimited`.
+        #[arg(long, default_value = "2")]
+        depth: String,
     },
     /// Run filters and rankers in the exact order supplied.
     Pipeline {
@@ -150,6 +167,10 @@ enum Command {
 
 fn main() -> Result<()> {
     let cli = Cli::parse();
+    if matches!(cli.command, Command::Quickref) {
+        print!("{}", manual::quickref());
+        return Ok(());
+    }
     if let Command::Manual { topic } = &cli.command {
         let rendered = manual::render(topic.as_deref())?;
         print!("{rendered}");
@@ -195,15 +216,15 @@ fn main() -> Result<()> {
                 .then(|| semantic::embed_missing(&mut database, batch_size))
                 .transpose()?;
             if cli.json {
-                print_json(&serde_json::json!({
-                    "vault": vault,
-                    "database": db_path,
-                    "notes": stats.as_ref().map(|stats| stats.notes),
-                    "chunks": stats.as_ref().map(|stats| stats.chunks),
-                    "links": stats.as_ref().map(|stats| stats.links),
-                    "embedded": embedded,
-                    "model": build_embed.then_some(semantic::MODEL_ID),
-                }))?;
+                print_json(&IndexOutput {
+                    vault: vault.to_string_lossy().into_owned(),
+                    database: db_path.to_string_lossy().into_owned(),
+                    notes: stats.as_ref().map(|stats| stats.notes),
+                    chunks: stats.as_ref().map(|stats| stats.chunks),
+                    links: stats.as_ref().map(|stats| stats.links),
+                    embedded,
+                    model: build_embed.then_some(semantic::MODEL_ID),
+                })?;
             } else {
                 if let Some(stats) = &stats {
                     println!(
@@ -221,6 +242,7 @@ fn main() -> Result<()> {
             query,
             limit,
             exclude,
+            path,
             max_chars,
             only,
             verbose,
@@ -236,14 +258,22 @@ fn main() -> Result<()> {
                 Some(SearchEngine::Rag) => ("rag", limit.saturating_mul(3).max(limit)),
                 None => ("bm25+rag", limit.saturating_mul(5).max(30)),
             };
-            let fetch_limit = if exclude.is_empty() {
+            let fetch_limit = if exclude.is_empty() && path.is_empty() {
                 fetch_limit
             } else {
                 usize::MAX
             };
             let mut hits = run_alias(&pipeline, &database, stage, &query, fetch_limit)?;
+            rerank_search_hits(&mut hits, &query);
+            include_hits(&mut hits, &vault, &path)?;
             exclude_hits(&mut hits, &vault, &exclude)?;
-            let context = build_context(&database, hits, limit, max_chars.unwrap_or(usize::MAX))?;
+            let context = build_context(
+                &database,
+                hits,
+                limit,
+                max_chars.unwrap_or(usize::MAX),
+                Some(&query),
+            )?;
             if context.len() == limit {
                 eprintln!("note: showing top {limit} results; use --limit to see more");
             }
@@ -328,19 +358,6 @@ fn main() -> Result<()> {
                 output_record_set(&result, cli.json)?;
             }
         }
-        Command::Backlinks { note } => {
-            if database.note_body(&note)?.is_none() {
-                bail!("note not found or ambiguous: {note}");
-            }
-            let links = database.backlinks(&note)?;
-            if cli.json {
-                print_json(&links)?;
-            } else {
-                for link in links {
-                    println!("{}\t{}", link.source.path, link.raw_target);
-                }
-            }
-        }
         Command::Links { note } => {
             if database.note_body(&note)?.is_none() {
                 bail!("note not found or ambiguous: {note}");
@@ -367,9 +384,25 @@ fn main() -> Result<()> {
                 }
             }
         }
-        Command::Graph { note, depth } => {
-            let graph = traverse_graph(&database, &note, depth)?;
-            output_notes(&graph, cli.json)?;
+        Command::Graph {
+            notes,
+            mut direction,
+            mut depth,
+        } => {
+            // Clap aliases do not expose which spelling selected the variant. Detect it
+            // before parsing would add global state, so normalize `backlinks` in argv.
+            let invoked_as_backlinks = std::env::args().any(|arg| arg == "backlinks");
+            if invoked_as_backlinks {
+                direction = GraphDirection::Incoming;
+                depth = "1".to_owned();
+            }
+            let depth = parse_graph_depth(&depth)?;
+            let graph = traverse_graph(&database, &notes, direction, depth)?;
+            if cli.json {
+                print_json(&graph)?;
+            } else {
+                output_notes(&graph.notes, false)?;
+            }
         }
         Command::Pipeline {
             stages,
@@ -391,8 +424,13 @@ fn main() -> Result<()> {
             let mut hits = pipeline.execute(&database, &stages)?;
             let total = hits.len();
             if context {
-                let context =
-                    build_context(&database, hits, limit, max_chars.unwrap_or(usize::MAX))?;
+                let context = build_context(
+                    &database,
+                    hits,
+                    limit,
+                    max_chars.unwrap_or(usize::MAX),
+                    None,
+                )?;
                 if total > limit {
                     eprintln!(
                         "note: {total} results found, showing first {limit} (use --limit to adjust)"
@@ -434,7 +472,9 @@ fn main() -> Result<()> {
                 println!("database: {}", db_path.display());
             }
         }
-        Command::Manual { .. } => unreachable!("manual exits before database initialization"),
+        Command::Manual { .. } | Command::Quickref => {
+            unreachable!("documentation commands exit before database initialization")
+        }
     }
     Ok(())
 }
@@ -575,27 +615,62 @@ fn output_record_set(result: &RecordSet, json: bool) -> Result<()> {
     Ok(())
 }
 
-fn traverse_graph(database: &Database, start: &str, depth: usize) -> Result<Vec<NoteRef>> {
-    let Some((start_note, _)) = database.note_body(start)? else {
-        bail!("note not found or ambiguous: {start}");
-    };
-    let mut queue = VecDeque::from([(start_note.clone(), 0)]);
-    let mut seen = HashSet::from([start_note.path.clone()]);
-    let mut result = vec![start_note];
+fn parse_graph_depth(value: &str) -> Result<Option<usize>> {
+    if value.eq_ignore_ascii_case("unlimited") {
+        return Ok(None);
+    }
+    value.parse::<usize>().map(Some).with_context(|| {
+        format!("invalid graph depth {value:?}; expected a non-negative integer or 'unlimited'")
+    })
+}
+
+fn traverse_graph(
+    database: &Database,
+    inputs: &[String],
+    direction: GraphDirection,
+    depth: Option<usize>,
+) -> Result<GraphOutput> {
+    let mut starts = Vec::new();
+    for input in inputs {
+        let Some((note, _)) = database.note_body(input)? else {
+            let candidates = database.note_candidates(input)?;
+            let hint = if candidates.is_empty() {
+                "no basename, suffix, or stem candidates found".to_owned()
+            } else {
+                format!("candidates: {}", candidates.join(", "))
+            };
+            bail!("note not found or ambiguous: {input}; {hint}; retry with an exact path");
+        };
+        starts.push(note);
+    }
+    starts.sort_by(|a, b| a.path.cmp(&b.path));
+    starts.dedup_by(|a, b| a.path == b.path);
+    let mut queue = VecDeque::new();
+    let mut seen = HashSet::new();
+    for note in &starts {
+        seen.insert(note.path.clone());
+        queue.push_back((note.clone(), 0));
+    }
+    let mut result = starts.clone();
 
     while let Some((note, current_depth)) = queue.pop_front() {
-        if current_depth >= depth {
+        if depth.is_some_and(|depth| current_depth >= depth) {
             continue;
         }
         let mut neighbors = Vec::new();
-        for link in database.outgoing_links(&note.path)? {
-            if let Some(target) = link.target {
-                neighbors.push(target);
+        if direction != GraphDirection::Incoming {
+            for link in database.outgoing_links(&note.path)? {
+                if let Some(target) = link.target {
+                    neighbors.push(target);
+                }
             }
         }
-        for link in database.backlinks(&note.path)? {
-            neighbors.push(link.source);
+        if direction != GraphDirection::Outgoing {
+            for link in database.backlinks(&note.path)? {
+                neighbors.push(link.source);
+            }
         }
+        neighbors.sort_by(|a, b| a.path.cmp(&b.path));
         for neighbor in neighbors {
             if seen.insert(neighbor.path.clone()) {
                 queue.push_back((neighbor.clone(), current_depth + 1));
@@ -603,15 +678,12 @@ fn traverse_graph(database: &Database, start: &str, depth: usize) -> Result<Vec<
             }
         }
     }
-    Ok(result)
-}
-
-#[derive(Serialize)]
-struct ContextItem {
-    path: String,
-    heading: Option<String>,
-    score: f64,
-    text: String,
+    Ok(GraphOutput {
+        direction: format!("{direction:?}").to_ascii_lowercase(),
+        depth,
+        starts,
+        notes: result,
+    })
 }
 
 fn build_context(
@@ -619,6 +691,7 @@ fn build_context(
     hits: Vec<SearchHit>,
     limit: usize,
     max_chars: usize,
+    query: Option<&str>,
 ) -> Result<Vec<ContextItem>> {
     let mut best_by_path = HashMap::<String, SearchHit>::new();
     for hit in hits {
@@ -656,14 +729,82 @@ fn build_context(
         }
         let text: String = body.chars().take(text_budget).collect();
         used += header_len + text.chars().count();
+        let match_reasons = match_reasons(&hit, query);
         context.push(ContextItem {
             path: hit.path,
             heading: hit.heading,
             score: hit.score,
             text,
+            match_reasons,
         });
     }
     Ok(context)
+}
+
+fn rerank_search_hits(hits: &mut [SearchHit], query: &str) {
+    let terms = query
+        .split_whitespace()
+        .map(str::to_ascii_lowercase)
+        .collect::<Vec<_>>();
+    for hit in hits.iter_mut() {
+        let path = hit.path.to_ascii_lowercase();
+        let title = hit.title.to_ascii_lowercase();
+        let heading = hit
+            .heading
+            .as_deref()
+            .unwrap_or_default()
+            .to_ascii_lowercase();
+        if terms.iter().any(|term| title == *term) {
+            hit.score += 0.08;
+        }
+        if terms.iter().any(|term| title.contains(term)) {
+            hit.score += 0.04;
+        }
+        if terms.iter().any(|term| heading.contains(term)) {
+            hit.score += 0.025;
+        }
+        if terms.iter().any(|term| path.contains(term)) {
+            hit.score += 0.015;
+        }
+    }
+    hits.sort_by(|a, b| {
+        b.score
+            .total_cmp(&a.score)
+            .then_with(|| a.path.cmp(&b.path))
+    });
+}
+
+fn match_reasons(hit: &SearchHit, query: Option<&str>) -> Vec<String> {
+    let Some(query) = query else {
+        return Vec::new();
+    };
+    let terms = query
+        .split_whitespace()
+        .map(str::to_ascii_lowercase)
+        .collect::<Vec<_>>();
+    let mut reasons = vec!["retrieval".to_owned()];
+    if terms
+        .iter()
+        .any(|term| hit.title.to_ascii_lowercase().contains(term))
+    {
+        reasons.push("title".to_owned());
+    }
+    if terms
+        .iter()
+        .any(|term| hit.path.to_ascii_lowercase().contains(term))
+    {
+        reasons.push("path".to_owned());
+    }
+    if terms.iter().any(|term| {
+        hit.heading
+            .as_deref()
+            .unwrap_or_default()
+            .to_ascii_lowercase()
+            .contains(term)
+    }) {
+        reasons.push("heading".to_owned());
+    }
+    reasons
 }
 
 fn run_alias(
@@ -696,9 +837,25 @@ fn exclude_hits(hits: &mut Vec<SearchHit>, vault: &Path, excludes: &[String]) ->
     Ok(())
 }
 
+fn include_hits(hits: &mut Vec<SearchHit>, vault: &Path, includes: &[String]) -> Result<()> {
+    if includes.is_empty() {
+        return Ok(());
+    }
+    let patterns = includes
+        .iter()
+        .map(|include| compile_path_regex(vault, include, "--path"))
+        .collect::<Result<Vec<_>>>()?;
+    hits.retain(|hit| patterns.iter().any(|pattern| pattern.is_match(&hit.path)));
+    Ok(())
+}
+
 fn compile_exclude_regex(vault: &Path, exclude: &str) -> Result<Regex> {
-    let pattern = normalize_exclude_pattern(vault, exclude);
-    Regex::new(&pattern).with_context(|| format!("invalid --exclude regex: {exclude}"))
+    compile_path_regex(vault, exclude, "--exclude")
+}
+
+fn compile_path_regex(vault: &Path, value: &str, flag: &str) -> Result<Regex> {
+    let pattern = normalize_exclude_pattern(vault, value);
+    Regex::new(&pattern).with_context(|| format!("invalid {flag} regex: {value}"))
 }
 
 fn normalize_exclude_pattern(vault: &Path, exclude: &str) -> String {

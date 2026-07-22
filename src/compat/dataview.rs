@@ -30,17 +30,42 @@ impl QueryAdapter for DataviewAdapter {
 
     fn execute(&self, context: &QueryContext<'_>, source: &str) -> Result<RecordSet> {
         let query = DqlQuery::parse(source)?;
+        let links = LinkIndex::build(context.database)?;
+        let current_path = context
+            .current_file
+            .as_ref()
+            .and_then(|path| path.strip_prefix(context.vault).ok())
+            .map(|path| path.to_string_lossy().replace('\\', "/"));
+        let current_value = if let Some(current_path) = current_path.as_ref() {
+            let pages = context.database.all_pages()?;
+            pages
+                .iter()
+                .find(|page| page.path == *current_path)
+                .map(|page| page_value(page, &links))
+        } else {
+            None
+        };
+
         let mut values = if query.kind == "task" {
             collect_tasks(context)?
         } else {
-            let links = LinkIndex::build(context.database)?;
-            context
+            let tasks = collect_tasks(context)?;
+            let mut pages: Vec<Value> = context
                 .database
                 .all_pages()?
                 .iter()
                 .map(|page| page_value(page, &links))
-                .collect()
+                .collect();
+            attach_file_tasks(&mut pages, &tasks);
+            pages
         };
+        if let Some(this_value) = &current_value {
+            for value in &mut values {
+                if let Some(object) = value.as_object_mut() {
+                    object.insert("this".to_owned(), this_value.clone());
+                }
+            }
+        }
         values.retain(|value| query.source.matches(value));
         for operation in &query.operations {
             match operation {
@@ -112,6 +137,15 @@ impl DqlQuery {
     fn parse(source: &str) -> Result<Self> {
         let normalized = split_dql_clauses(source);
         let first = normalized.first().context("empty Dataview query")?;
+        let head = first.split_whitespace().next().unwrap_or_default();
+        if !["LIST", "TABLE", "TASK", "CALENDAR"]
+            .iter()
+            .any(|kind| head.eq_ignore_ascii_case(kind))
+        {
+            bail!(
+                "Dataview DQL requires a LIST, TABLE, TASK, or CALENDAR head; for example: LIST FROM \"Worklog\" WHERE {source}"
+            );
+        }
         let (kind, projection) = parse_head(first)?;
         let projection = projection
             .strip_prefix("WITHOUT ID")
@@ -388,15 +422,7 @@ impl QueryAdapter for DataviewJsAdapter {
             .iter()
             .map(|page| page_value(page, &links))
             .collect();
-        for page in &mut pages {
-            let path = page["file"]["path"].as_str().unwrap_or_default();
-            let page_tasks = tasks
-                .iter()
-                .filter(|task| task["path"].as_str() == Some(path))
-                .cloned()
-                .collect();
-            page["file"]["tasks"] = Value::Array(page_tasks);
-        }
+        attach_file_tasks(&mut pages, &tasks);
         resolve_page_links(&mut pages);
         let current_path = context
             .current_file
@@ -504,6 +530,23 @@ impl QueryAdapter for DataviewJsAdapter {
             }
         }
         Ok(RecordSet::new("dataviewjs", rows))
+    }
+}
+
+/// Groups collected tasks by their page path and attaches them as
+/// `file.tasks` on each page value, mirroring Dataview's implicit
+/// `file.tasks` page field.
+fn attach_file_tasks(pages: &mut [Value], tasks: &[Value]) {
+    let mut by_path: HashMap<&str, Vec<Value>> = HashMap::new();
+    for task in tasks {
+        if let Some(path) = task["path"].as_str() {
+            by_path.entry(path).or_default().push(task.clone());
+        }
+    }
+    for page in pages {
+        let path = page["file"]["path"].as_str().unwrap_or_default();
+        let page_tasks = by_path.remove(path).unwrap_or_default();
+        page["file"]["tasks"] = Value::Array(page_tasks);
     }
 }
 
@@ -697,5 +740,49 @@ mod tests {
             .unwrap();
 
         assert_eq!(result.rows.len(), 2);
+    }
+
+    #[test]
+    fn page_query_exposes_file_tasks_to_lambda_predicates() {
+        let temp = tempfile::tempdir().unwrap();
+        let vault = temp.path().join("vault");
+        fs::create_dir_all(&vault).unwrap();
+        fs::write(
+            vault.join("with-open-task.md"),
+            "---\nstatus: \"active\"\n---\n# With open task\n\n- [ ] Pending work [due::2026-07-15]\n- [x] Finished work [due::2026-07-01]\n",
+        )
+        .unwrap();
+        fs::write(
+            vault.join("all-done.md"),
+            "---\nstatus: \"active\"\n---\n# All done\n\n- [x] Finished work [due::2026-07-15]\n",
+        )
+        .unwrap();
+        fs::write(
+            vault.join("no-tasks.md"),
+            "---\nstatus: \"active\"\n---\n# No tasks\n",
+        )
+        .unwrap();
+
+        let db_path = default_db_path(&vault).unwrap();
+        let mut database = Database::open(&db_path).unwrap();
+        database.rebuild(&vault).unwrap();
+        let context = QueryContext {
+            database: &database,
+            vault: &vault,
+            current_file: None,
+        };
+
+        let result = DataviewAdapter
+            .execute(
+                &context,
+                "TABLE file.path FROM \"\" WHERE status = \"active\" AND any(file.tasks, (t) => !t.completed AND t.due = date(\"2026-07-15\"))",
+            )
+            .unwrap();
+
+        assert_eq!(result.rows.len(), 1);
+        assert_eq!(
+            result.rows[0].get("file.path"),
+            Some(&Value::String("with-open-task.md".to_owned()))
+        );
     }
 }

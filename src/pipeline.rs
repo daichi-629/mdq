@@ -209,7 +209,12 @@ impl StageExecutor for HybridStage {
             semantic::search(context.database, argument, usize::MAX)?,
             input,
         )?;
-        Ok(reciprocal_rank_fusion([lexical, semantic]))
+        // Lexical evidence is deliberately weighted more heavily. Semantic search is
+        // useful for paraphrases, but should not erase strong exact-term matches.
+        Ok(weighted_reciprocal_rank_fusion([
+            (lexical, 3.0),
+            (semantic, 1.0),
+        ]))
     }
 }
 
@@ -221,12 +226,14 @@ fn restrict_to_input(ranked: Vec<SearchHit>, input: Vec<SearchHit>) -> Result<Ve
         .collect())
 }
 
-fn reciprocal_rank_fusion<const N: usize>(rankings: [Vec<SearchHit>; N]) -> Vec<SearchHit> {
+fn weighted_reciprocal_rank_fusion<const N: usize>(
+    rankings: [(Vec<SearchHit>, f64); N],
+) -> Vec<SearchHit> {
     const K: f64 = 60.0;
     let mut fused = HashMap::<i64, (SearchHit, f64)>::new();
-    for ranking in rankings {
+    for (ranking, weight) in rankings {
         for (rank, hit) in ranking.into_iter().enumerate() {
-            let score = 1.0 / (K + rank as f64 + 1.0);
+            let score = weight / (K + rank as f64 + 1.0);
             fused
                 .entry(hit.chunk_id)
                 .and_modify(|(_, total)| *total += score)
@@ -335,5 +342,21 @@ mod tests {
         assert_eq!(rank_then_filter.len(), 1);
         assert_eq!(filter_then_rank[0].path, "included.md");
         assert_eq!(rank_then_filter[0].path, "included.md");
+    }
+
+    #[test]
+    fn hybrid_fusion_preserves_strong_lexical_order_against_opposite_semantic_order() {
+        let hit = |chunk_id, path: &str| SearchHit {
+            chunk_id,
+            path: path.to_owned(),
+            title: path.to_owned(),
+            heading: None,
+            score: 0.0,
+            snippet: String::new(),
+        };
+        let lexical = vec![hit(1, "exact.md"), hit(2, "concept.md")];
+        let semantic = vec![hit(2, "concept.md"), hit(1, "exact.md")];
+        let fused = weighted_reciprocal_rank_fusion([(lexical, 3.0), (semantic, 1.0)]);
+        assert_eq!(fused[0].path, "exact.md");
     }
 }

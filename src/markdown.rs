@@ -5,7 +5,7 @@ use std::time::UNIX_EPOCH;
 
 use anyhow::{Context, Result};
 use percent_encoding::percent_decode_str;
-use pulldown_cmark::{Event, Options, Parser, Tag};
+use pulldown_cmark::{Event, Options, Parser, Tag, TagEnd};
 use regex::Regex;
 use sha2::{Digest, Sha256};
 
@@ -143,9 +143,33 @@ fn push_section(chunks: &mut Vec<ParsedChunk>, heading: Option<String>, text: &s
 }
 
 pub fn extract_links(body: &str) -> Vec<ParsedLink> {
+    // pulldown-cmark deliberately exposes code as text-like events. Mask those byte
+    // ranges before applying the Wiki-link regexp so links shown as examples never
+    // become graph edges. Newlines are retained to keep the Markdown structure stable.
+    let mut masked = body.as_bytes().to_vec();
+    let mut in_code_block = false;
+    for (event, range) in Parser::new_ext(body, Options::all()).into_offset_iter() {
+        match event {
+            Event::Start(Tag::CodeBlock(_)) => in_code_block = true,
+            Event::End(TagEnd::CodeBlock) => {
+                mask_bytes(&mut masked, range);
+                in_code_block = false;
+                continue;
+            }
+            Event::Code(_) | Event::InlineMath(_) | Event::DisplayMath(_) => {
+                mask_bytes(&mut masked, range);
+                continue;
+            }
+            _ => {}
+        }
+        if in_code_block {
+            mask_bytes(&mut masked, range);
+        }
+    }
+    let wiki_source = String::from_utf8(masked).expect("masking produces valid UTF-8");
     let wiki_re = Regex::new(r"(!)?\[\[([^\[\]]+)\]\]").unwrap();
     let mut links: Vec<ParsedLink> = wiki_re
-        .captures_iter(body)
+        .captures_iter(&wiki_source)
         .filter_map(|captures| {
             let raw = captures.get(2)?.as_str().trim().to_owned();
             let destination = raw.split('|').next()?.trim().to_owned();
@@ -195,6 +219,14 @@ pub fn extract_links(body: &str) -> Vec<ParsedLink> {
     links
 }
 
+fn mask_bytes(bytes: &mut [u8], range: std::ops::Range<usize>) {
+    for byte in &mut bytes[range] {
+        if *byte != b'\n' && *byte != b'\r' {
+            *byte = b' ';
+        }
+    }
+}
+
 pub fn extract_tags(body: &str) -> Vec<String> {
     let tag_re = Regex::new(r"(?:^|[^A-Za-z0-9_])#([A-Za-z0-9_/-]+)").unwrap();
     let mut tags: Vec<String> = tag_re
@@ -242,6 +274,28 @@ fn has_uri_scheme(destination: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn links_ignore_inline_and_fenced_code() {
+        let body = "[[kept|Alias]] `[[inline]]`\n~~~md\n[[fenced]]\n```\n[[nested-looking]]\n```\n~~~\n[[after#Heading]]";
+        let links = extract_links(body);
+        assert_eq!(
+            links
+                .iter()
+                .map(|link| link.target.as_str())
+                .collect::<Vec<_>>(),
+            ["kept", "after"]
+        );
+        assert_eq!(links[1].heading.as_deref(), Some("Heading"));
+    }
+
+    #[test]
+    fn links_ignore_unclosed_fence_and_markdown_links_in_code() {
+        let body = "[kept](target.md)\n```\n[[wiki-code]]\n[code](other.md)";
+        let links = extract_links(body);
+        assert_eq!(links.len(), 1);
+        assert_eq!(links[0].target, "target");
+    }
 
     #[test]
     fn parses_arbitrary_frontmatter() {

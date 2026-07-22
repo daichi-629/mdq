@@ -3,6 +3,7 @@ use std::fs;
 use mdq::compat::CompatibilityEngine;
 use mdq::core::QueryContext;
 use mdq::db::Database;
+use serde_json::Value;
 
 fn fixture() -> (tempfile::TempDir, Database) {
     let directory = tempfile::tempdir().unwrap();
@@ -97,4 +98,134 @@ views:
         .unwrap();
     assert_eq!(dataviewjs.rows.len(), 1);
     assert_eq!(dataviewjs.rows[0]["render"], "task");
+}
+
+#[test]
+fn dataview_where_and_chain_filters_booleans_correctly() {
+    let directory = tempfile::tempdir().unwrap();
+    let vault = directory.path().join("vault");
+    fs::create_dir_all(vault.join("Projects")).unwrap();
+    for (name, owner, active, score) in [
+        ("Atlas-011", "Alice-Old", true, 8),
+        ("Atlas-155", "Alice-Old", true, 1),
+        ("Beacon-062", "Alice-Old", false, 8),
+        ("Echo-016", "Alice-Old", true, 9),
+        ("Other-001", "Alice", true, 10),
+    ] {
+        fs::write(
+            vault.join(format!("Projects/{name}.md")),
+            format!(
+                r#"---
+owner: {owner}
+active: {active}
+score: {score}
+type: project
+---
+# {name}
+"#
+            ),
+        )
+        .unwrap();
+    }
+    let mut database = Database::open(&directory.path().join("index.sqlite3")).unwrap();
+    database.rebuild(&vault).unwrap();
+    let context = QueryContext {
+        database: &database,
+        vault: &vault,
+        current_file: None,
+    };
+    let engine = CompatibilityEngine::standard();
+
+    let dql = engine
+        .execute(
+            "dataview",
+            &context,
+            r#"TABLE file.path FROM "Projects" WHERE owner = "Alice-Old" AND active = true AND score >= 8 AND type = "project""#,
+        )
+        .unwrap();
+    let paths: Vec<_> = dql
+        .rows
+        .iter()
+        .map(|row| row["file.path"].as_str().unwrap())
+        .collect();
+
+    assert_eq!(paths, ["Projects/Atlas-011.md", "Projects/Echo-016.md"]);
+}
+
+#[test]
+fn dataview_exposes_inlinks_and_outlinks() {
+    let directory = tempfile::tempdir().unwrap();
+    let vault = directory.path().join("vault");
+    fs::create_dir_all(&vault).unwrap();
+    fs::write(vault.join("alpha.md"), "# Alpha\n[[beta]]\n").unwrap();
+    fs::write(vault.join("beta.md"), "# Beta\n[[alpha]]\n").unwrap();
+    fs::write(vault.join("gamma.md"), "# Gamma\n").unwrap();
+
+    let mut database = Database::open(&directory.path().join("index.sqlite3")).unwrap();
+    database.rebuild(&vault).unwrap();
+    let context = QueryContext {
+        database: &database,
+        vault: &vault,
+        current_file: None,
+    };
+    let engine = CompatibilityEngine::standard();
+
+    let dql = engine
+        .execute(
+            "dataview",
+            &context,
+            r#"TABLE file.path, length(file.inlinks) AS inlinks, length(file.outlinks) AS outlinks FROM "" SORT file.path"#,
+        )
+        .unwrap();
+    let alpha = dql
+        .rows
+        .iter()
+        .find(|row| row["file.path"] == Value::String("alpha.md".to_owned()))
+        .unwrap();
+    assert_eq!(alpha["inlinks"].as_f64(), Some(1.0));
+    assert_eq!(alpha["outlinks"].as_f64(), Some(1.0));
+
+    let dataviewjs = engine
+        .execute(
+            "dataviewjs",
+            &context,
+            r#"dv.table(["path", "inlinks", "outlinks"], dv.pages().sort(p => p.file.path).map(p => [p.file.path, p.file.inlinks.length, p.file.outlinks.length]));"#,
+        )
+        .unwrap();
+    let alpha = dataviewjs
+        .rows
+        .iter()
+        .find(|row| row["value"][0] == Value::String("alpha.md".to_owned()))
+        .unwrap();
+    assert_eq!(alpha["value"][1].as_f64(), Some(1.0));
+    assert_eq!(alpha["value"][2].as_f64(), Some(1.0));
+}
+
+#[test]
+fn dataview_resolves_this_from_current_file() {
+    let (directory, database) = fixture();
+    let vault = directory.path().join("vault");
+    let context = QueryContext {
+        database: &database,
+        vault: &vault,
+        current_file: Some(vault.join("Daily/2026-06-14.md")),
+    };
+    let engine = CompatibilityEngine::standard();
+
+    let result = engine
+        .execute(
+            "dataview",
+            &context,
+            r#"LIST
+WHERE file.path != this.file.path
+SORT file.name ASC"#,
+        )
+        .unwrap();
+
+    let paths: Vec<_> = result
+        .rows
+        .iter()
+        .map(|row| row["file"]["path"].as_str().unwrap())
+        .collect();
+    assert_eq!(paths, ["Project.md"]);
 }
