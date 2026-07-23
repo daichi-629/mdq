@@ -98,6 +98,49 @@ views:
         .unwrap();
     assert_eq!(dataviewjs.rows.len(), 1);
     assert_eq!(dataviewjs.rows[0]["render"], "task");
+
+    let dataviewjs_list = engine
+        .execute("dataviewjs", &context, "dv.list([1, 2, 3]);")
+        .unwrap();
+    assert_eq!(dataviewjs_list.rows.len(), 3);
+    assert_eq!(dataviewjs_list.rows[0]["value"], 1);
+    assert_eq!(dataviewjs_list.rows[1]["value"], 2);
+    assert_eq!(dataviewjs_list.rows[2]["value"], 3);
+
+    let dataviewjs_current = engine
+        .execute(
+            "dataviewjs",
+            &context,
+            "dv.list([dv.current().file.frontmatter.score, dv.current().note.score]);",
+        )
+        .unwrap();
+    assert_eq!(dataviewjs_current.rows.len(), 2);
+    assert_eq!(dataviewjs_current.rows[0]["value"], 4);
+    assert_eq!(dataviewjs_current.rows[1]["value"], 4);
+
+    let dataviewjs_keys = engine
+        .execute(
+            "dataviewjs",
+            &context,
+            "dv.list(Object.keys(dv.current().file.frontmatter));",
+        )
+        .unwrap();
+    assert!(
+        dataviewjs_keys
+            .rows
+            .iter()
+            .any(|row| row["value"] == "score")
+    );
+
+    let dataviewjs_tag = engine
+        .execute(
+            "dataviewjs",
+            &context,
+            "dv.list(dv.pages('#daily').map(p => p.file.path));",
+        )
+        .unwrap();
+    assert_eq!(dataviewjs_tag.rows.len(), 1);
+    assert_eq!(dataviewjs_tag.rows[0]["value"], "Daily/2026-06-14.md");
 }
 
 #[test]

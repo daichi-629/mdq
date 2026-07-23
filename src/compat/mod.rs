@@ -31,45 +31,67 @@ pub(crate) struct LinkIndex {
 }
 
 impl LinkIndex {
+    pub(crate) fn empty() -> Self {
+        Self {
+            by_source: HashMap::new(),
+            by_target: HashMap::new(),
+        }
+    }
+
     pub(crate) fn build(database: &Database) -> Result<Self> {
-        let mut by_source: HashMap<String, Vec<Value>> = HashMap::new();
-        let mut by_target: HashMap<String, Vec<Value>> = HashMap::new();
+        let mut index = Self {
+            by_source: HashMap::new(),
+            by_target: HashMap::new(),
+        };
         for link in database.all_links()? {
-            let path = link
-                .resolved_path
-                .clone()
-                .unwrap_or(link.raw_target.clone());
-            let display = link
-                .target
-                .as_ref()
-                .map(|target| target.title.clone())
-                .unwrap_or_else(|| link.raw_target.clone());
-            let value = json!({
+            index.insert(link);
+        }
+        Ok(index)
+    }
+
+    pub(crate) fn build_for_page(database: &Database, path: &str) -> Result<Self> {
+        let mut index = Self::empty();
+        for link in database.outgoing_links(path)? {
+            index.insert(link);
+        }
+        for link in database.backlinks(path)? {
+            if link.source.path != path {
+                index.insert(link);
+            }
+        }
+        Ok(index)
+    }
+
+    fn insert(&mut self, link: crate::model::LinkRef) {
+        let path = link
+            .resolved_path
+            .clone()
+            .unwrap_or(link.raw_target.clone());
+        let display = link
+            .target
+            .as_ref()
+            .map(|target| target.title.clone())
+            .unwrap_or_else(|| link.raw_target.clone());
+        self.by_source
+            .entry(link.source.path.clone())
+            .or_default()
+            .push(json!({
                 "__kind": "link",
                 "path": path,
                 "display": display,
                 "embed": link.embed,
-            });
-            by_source
-                .entry(link.source.path.clone())
+            }));
+        if let Some(target) = &link.target {
+            self.by_target
+                .entry(target.path.clone())
                 .or_default()
-                .push(value.clone());
-            if let Some(target) = &link.target {
-                by_target
-                    .entry(target.path.clone())
-                    .or_default()
-                    .push(json!({
-                        "__kind": "link",
-                        "path": link.source.path,
-                        "display": link.source.title,
-                        "embed": link.embed,
-                    }));
-            }
+                .push(json!({
+                    "__kind": "link",
+                    "path": link.source.path,
+                    "display": link.source.title,
+                    "embed": link.embed,
+                }));
         }
-        Ok(Self {
-            by_source,
-            by_target,
-        })
     }
 
     fn links_for(&self, path: &str) -> Vec<Value> {

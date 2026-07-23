@@ -13,7 +13,7 @@ use serde_json::{Map, Value, json};
 
 use crate::core::{QueryAdapter, QueryContext, RecordSet, Row};
 use crate::markdown::extract_links;
-use crate::model::ParsedLink;
+use crate::model::{PageRecord, ParsedLink};
 use crate::script::{QuickJsEngine, ScriptEngine};
 
 use super::expr::value_order;
@@ -172,8 +172,21 @@ fn collect_tasks_with_settings(
     status_overrides: &[TaskStatusOverride],
     global_filter: Option<&str>,
 ) -> Result<Vec<Value>> {
+    let pages = context.database.all_pages()?;
+    collect_tasks_from_pages_with_settings(&pages, status_overrides, global_filter)
+}
+
+pub(crate) fn collect_tasks_from_pages(pages: &[PageRecord]) -> Result<Vec<Value>> {
+    collect_tasks_from_pages_with_settings(pages, &[], None)
+}
+
+fn collect_tasks_from_pages_with_settings(
+    pages: &[PageRecord],
+    status_overrides: &[TaskStatusOverride],
+    global_filter: Option<&str>,
+) -> Result<Vec<Value>> {
     let mut tasks = Vec::new();
-    for page in context.database.all_pages()? {
+    for page in pages {
         let outlinks_in_body = link_values(extract_links(&page.body));
         let outlinks_in_properties = frontmatter_link_values(&page.metadata);
         let file_outlinks = merge_link_values(&outlinks_in_properties, &outlinks_in_body);

@@ -675,12 +675,15 @@ DataArray methods:
   where, map, flatMap, sort, groupBy, distinct, array
 
 Security boundary:
-  - QuickJS runs in-process with a 64 MiB memory limit, 512 KiB stack limit,
-    and 500 ms interrupt deadline.
+  - QuickJS runs in-process with a vault-sized read-only host-data allowance
+    plus a 64 MiB script memory budget, 512 KiB stack limit, and 500 ms
+    interrupt deadline.
   - No Obsidian `app`, Node `require` or `process`, network `fetch`,
     XMLHttpRequest, WebSocket, DOM `document`, `window`, or `eval`.
   - `dv.io` and DOM rendering are disabled.
   - The vault is exposed as serialized read-only page/task data.
+  - Page indexes, page metadata, links, and per-page tasks are loaded lazily
+    from Rust; user JavaScript executes exactly once.
   - `dv.view` may only load a `.js` file beneath the selected vault.
   - Treat DataviewJS and Tasks function scripts as trusted code — the sandbox
     restricts host access, not script capabilities within the vault data.

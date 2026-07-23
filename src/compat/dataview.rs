@@ -1,19 +1,22 @@
 use std::collections::{BTreeMap, HashMap};
 use std::fs;
 use std::path::{Component, Path};
+use std::sync::{Arc, Mutex, OnceLock};
 
-use anyhow::{Context, Result, bail};
+use anyhow::{Context, Result, anyhow, bail};
 use pest::Parser;
 use pest::iterators::Pair;
 use pest_derive::Parser;
 use regex::Regex;
+use rquickjs::{Error as JsError, Function};
 use serde_json::{Value, json};
 
 use crate::core::{QueryAdapter, QueryContext, RecordSet, Row};
-use crate::script::{QuickJsEngine, ScriptEngine};
+use crate::db::Database;
+use crate::script::{QuickJsEngine, ScriptHostControl};
 
 use super::expr::{Expr, total_value_order};
-use super::tasks::collect_tasks;
+use super::tasks::{collect_tasks, collect_tasks_from_pages};
 use super::{LinkIndex, page_value};
 
 pub struct DataviewAdapter;
@@ -414,27 +417,23 @@ impl QueryAdapter for DataviewJsAdapter {
     }
 
     fn execute(&self, context: &QueryContext<'_>, source: &str) -> Result<RecordSet> {
-        let tasks = collect_tasks(context)?;
-        let links = LinkIndex::build(context.database)?;
-        let mut pages: Vec<Value> = context
-            .database
-            .all_pages()?
-            .iter()
-            .map(|page| page_value(page, &links))
-            .collect();
-        attach_file_tasks(&mut pages, &tasks);
-        resolve_page_links(&mut pages);
+        let expanded = expand_views(context, source)?;
         let current_path = context
             .current_file
             .as_ref()
             .and_then(|path| path.strip_prefix(context.vault).ok())
             .map(|path| path.to_string_lossy().replace('\\', "/"));
-        let current = current_path
-            .as_ref()
-            .and_then(|path| pages.iter().find(|page| page["file"]["path"] == *path))
-            .cloned()
-            .unwrap_or(Value::Null);
-        let expanded = expand_views(context, source)?;
+        let database_path = context
+            .database
+            .path()
+            .context("DataviewJS requires a file-backed database")?
+            .to_path_buf();
+        let host_memory_bytes = context
+            .database
+            .total_page_bytes()?
+            .saturating_mul(8)
+            .saturating_add(16 * 1024 * 1024);
+        let host = DataviewJsHost::new(database_path)?;
         let program = format!(
             r#"
             const __outputs = [];
@@ -481,25 +480,130 @@ impl QueryAdapter for DataviewJsAdapter {
               array() {{ return Array.from(this); }}
             }}
             const __dateFields = ['due', 'scheduled', 'start', 'completion', 'created', 'cancelled'];
-            const __pages = DataArray.from(__mdq.pages);
-            for (const page of __pages) {{
-              page.file.tasks = DataArray.from((page.file.tasks || []).map(task => {{
-                for (const field of __dateFields) {{
-                  if (typeof task[field] === 'string') task[field] = new MdqDate(task[field]);
-                }}
-                return task;
-              }}));
+            const __indexCache = new Map();
+            const __pageCache = new Map();
+            const __proxyCache = new Map();
+            const __taskCache = new Map();
+            const __linkCache = new Map();
+            function __parseHost(load) {{
+              try {{
+                return JSON.parse(load());
+              }} finally {{
+                __mdq_end_host_phase();
+              }}
             }}
-            const __current = __pages.find(page => page.file.path === __mdq.current?.file?.path) || null;
+            function __loadIndex(source) {{
+              const key = source == null ? '' : String(source);
+              if (!__indexCache.has(key)) {{
+                __indexCache.set(key, __parseHost(() => __mdq_page_index(source)));
+              }}
+              return __indexCache.get(key);
+            }}
+            function __loadTasks(path) {{
+              if (!__taskCache.has(path)) {{
+                const tasks = __parseHost(() => __mdq_load_tasks(path));
+                for (const field of __dateFields) {{
+                  for (const task of tasks) {{
+                    if (typeof task[field] === 'string') task[field] = new MdqDate(task[field]);
+                  }}
+                }}
+                __taskCache.set(path, DataArray.from(tasks));
+              }}
+              return __taskCache.get(path);
+            }}
+            function __loadLinks(path) {{
+              if (!__linkCache.has(path)) {{
+                __linkCache.set(path, __parseHost(() => __mdq_load_links(path)));
+              }}
+              return __linkCache.get(path);
+            }}
+            function __loadPage(path) {{
+              if (!__pageCache.has(path)) {{
+                const page = __parseHost(() => __mdq_load_page(path));
+                const metadata = Object.fromEntries(
+                  Object.entries(page).filter(([key]) => key !== 'file')
+                );
+                page.note = metadata;
+                page.file.properties = metadata;
+                page.file.frontmatter = metadata;
+                __pageCache.set(path, page);
+              }}
+              return __pageCache.get(path);
+            }}
+            function __pageProxy(descriptor) {{
+              if (__proxyCache.has(descriptor.path)) return __proxyCache.get(descriptor.path);
+              const slash = descriptor.path.lastIndexOf('/');
+              const basicFile = {{
+                path: descriptor.path,
+                name: descriptor.name,
+                basename: descriptor.name,
+                folder: slash < 0 ? '' : descriptor.path.slice(0, slash),
+                ext: 'md'
+              }};
+              const file = new Proxy(basicFile, {{
+                get(target, key) {{
+                  if (key === 'tasks') return __loadTasks(descriptor.path);
+                  if (['links', 'outlinks', 'backlinks', 'inlinks', 'embeds'].includes(key)) {{
+                    return Reflect.get(__loadLinks(descriptor.path), key);
+                  }}
+                  if (Reflect.has(target, key)) return Reflect.get(target, key);
+                  return Reflect.get(__loadPage(descriptor.path).file, key);
+                }},
+                set(_target, key, value) {{
+                  return Reflect.set(__loadPage(descriptor.path).file, key, value);
+                }},
+                has(target, key) {{
+                  return Reflect.has(target, key) || key in __loadPage(descriptor.path).file;
+                }},
+                ownKeys() {{
+                  return Reflect.ownKeys(__loadPage(descriptor.path).file);
+                }},
+                getOwnPropertyDescriptor(_target, key) {{
+                  let value;
+                  if (key === 'tasks') value = __loadTasks(descriptor.path);
+                  else if (['links', 'outlinks', 'backlinks', 'inlinks', 'embeds'].includes(key)) {{
+                    value = Reflect.get(__loadLinks(descriptor.path), key);
+                  }} else value = Reflect.get(__loadPage(descriptor.path).file, key);
+                  return {{value, enumerable: true, configurable: true, writable: true}};
+                }}
+              }});
+              const page = new Proxy({{}}, {{
+                get(_target, key) {{
+                  if (key === 'file') return file;
+                  return Reflect.get(__loadPage(descriptor.path), key);
+                }},
+                set(_target, key, value) {{
+                  return Reflect.set(__loadPage(descriptor.path), key, value);
+                }},
+                has(_target, key) {{
+                  return key === 'file' || key in __loadPage(descriptor.path);
+                }},
+                ownKeys() {{
+                  return Reflect.ownKeys(__loadPage(descriptor.path));
+                }},
+                getOwnPropertyDescriptor(_target, key) {{
+                  const value = key === 'file' ? file : Reflect.get(__loadPage(descriptor.path), key);
+                  return {{value, enumerable: true, configurable: true, writable: true}};
+                }}
+              }});
+              __proxyCache.set(descriptor.path, page);
+              return page;
+            }}
+            function __pages(source) {{
+              return DataArray.from(__loadIndex(source).map(__pageProxy));
+            }}
+            function __page(path) {{
+              for (const descriptor of __loadIndex(null)) {{
+                if (descriptor.path === path || descriptor.name === path) {{
+                  return __pageProxy(descriptor);
+                }}
+              }}
+              return null;
+            }}
             const dv = {{
-              pages(source) {{
-                if (!source || source === '""') return DataArray.from(__pages);
-                if (source.startsWith('#')) return DataArray.from(__pages.filter(p => (p.file.tags || []).some(t => t === source || `#${{t}}` === source)));
-                const folder = source.replace(/^"|"$/g, '');
-                return DataArray.from(__pages.filter(p => p.file.path.startsWith(folder)));
-              }},
-              page(path) {{ return __pages.find(p => p.file.path === path || p.file.name === path) || null; }},
-              current() {{ return __current; }},
+              pages(source) {{ return __pages(source); }},
+              page(path) {{ return __page(path); }},
+              current() {{ return __mdq.currentPath ? __page(__mdq.currentPath) : null; }},
               date(value) {{ return value instanceof MdqDate ? value : new MdqDate(String(value)); }},
               fileLink(path, embed=false, display=null) {{ return {{path, embed, display: display || path}}; }},
               list(values) {{ __outputs.push({{kind:'list', rows:Array.from(values)}}); }},
@@ -514,22 +618,317 @@ impl QueryAdapter for DataviewJsAdapter {
             return __outputs;
             "#
         );
-        let result = QuickJsEngine::default().evaluate(
+        let result = QuickJsEngine::default().evaluate_with_setup(
             &program,
-            &json!({"pages": pages, "tasks": tasks, "current": current}),
+            &json!({"currentPath": current_path}),
+            host_memory_bytes,
+            move |control, ctx| {
+                let index_host = host.clone();
+                let index_control = control.clone();
+                ctx.globals().set(
+                    "__mdq_page_index",
+                    Function::new(ctx.clone(), move |source: Option<String>| {
+                        load_host_json(&index_control, || index_host.page_index_json(source))
+                    })?,
+                )?;
+
+                let page_host = host.clone();
+                let page_control = control.clone();
+                ctx.globals().set(
+                    "__mdq_load_page",
+                    Function::new(ctx.clone(), move |path: String| {
+                        load_host_json(&page_control, || page_host.page_json(path))
+                    })?,
+                )?;
+
+                let tasks_host = host.clone();
+                let tasks_control = control.clone();
+                ctx.globals().set(
+                    "__mdq_load_tasks",
+                    Function::new(ctx.clone(), move |path: String| {
+                        load_host_json(&tasks_control, || tasks_host.tasks_json(path))
+                    })?,
+                )?;
+
+                let links_host = host;
+                let links_control = control.clone();
+                ctx.globals().set(
+                    "__mdq_load_links",
+                    Function::new(ctx.clone(), move |path: String| {
+                        load_host_json(&links_control, || links_host.links_json(path))
+                    })?,
+                )?;
+
+                let commit_control = control.clone();
+                ctx.globals().set(
+                    "__mdq_end_host_phase",
+                    Function::new(ctx.clone(), move || commit_control.end_host_phase())?,
+                )?;
+                Ok(())
+            },
         )?;
-        let outputs = result.as_array().cloned().unwrap_or_default();
-        let mut rows = Vec::new();
-        for output in outputs {
-            let kind = output["kind"].as_str().unwrap_or("value");
-            for value in output["rows"].as_array().cloned().unwrap_or_default() {
-                let mut row = BTreeMap::new();
-                row.insert("render".to_owned(), Value::String(kind.to_owned()));
-                row.insert("value".to_owned(), value);
-                rows.push(row);
-            }
+        Ok(dataviewjs_record_set(&result))
+    }
+}
+
+fn dataviewjs_record_set(outputs: &Value) -> RecordSet {
+    let outputs = outputs.as_array().cloned().unwrap_or_default();
+    let mut rows = Vec::new();
+    for output in outputs {
+        let kind = output["kind"].as_str().unwrap_or("value");
+        for value in output["rows"].as_array().cloned().unwrap_or_default() {
+            let mut row = BTreeMap::new();
+            row.insert("render".to_owned(), Value::String(kind.to_owned()));
+            row.insert("value".to_owned(), value);
+            rows.push(row);
         }
-        Ok(RecordSet::new("dataviewjs", rows))
+    }
+    RecordSet::new("dataviewjs", rows)
+}
+
+#[derive(Clone)]
+struct DataviewJsHost {
+    database: Arc<Mutex<Database>>,
+    indexes: Arc<Mutex<HashMap<String, std::result::Result<String, String>>>>,
+    pages: Arc<Mutex<HashMap<String, std::result::Result<String, String>>>>,
+    tasks: Arc<Mutex<HashMap<String, std::result::Result<String, String>>>>,
+    links: Arc<Mutex<HashMap<String, std::result::Result<String, String>>>>,
+    names: Arc<OnceLock<std::result::Result<HashMap<String, String>, String>>>,
+}
+
+impl DataviewJsHost {
+    fn new(database_path: std::path::PathBuf) -> Result<Self> {
+        Ok(Self {
+            database: Arc::new(Mutex::new(Database::open_existing(&database_path)?)),
+            indexes: Arc::new(Mutex::new(HashMap::new())),
+            pages: Arc::new(Mutex::new(HashMap::new())),
+            tasks: Arc::new(Mutex::new(HashMap::new())),
+            links: Arc::new(Mutex::new(HashMap::new())),
+            names: Arc::new(OnceLock::new()),
+        })
+    }
+
+    fn page_names(&self) -> Result<&HashMap<String, String>> {
+        match self.names.get_or_init(|| {
+            (|| {
+                let database = self
+                    .database
+                    .lock()
+                    .map_err(|_| anyhow!("DataviewJS database lock is poisoned"))?;
+                Ok(database
+                    .all_page_refs()?
+                    .into_iter()
+                    .map(|page| {
+                        let name = page
+                            .path
+                            .trim_end_matches(".md")
+                            .rsplit('/')
+                            .next()
+                            .unwrap_or(&page.path)
+                            .to_owned();
+                        (name, page.path)
+                    })
+                    .collect())
+            })()
+            .map_err(|error: anyhow::Error| format!("{error:#}"))
+        }) {
+            Ok(names) => Ok(names),
+            Err(error) => Err(anyhow!(error.clone())),
+        }
+    }
+
+    fn page_index_json(&self, source: Option<String>) -> Result<String> {
+        let key = source.unwrap_or_default();
+        if let Some(result) = self
+            .indexes
+            .lock()
+            .ok()
+            .and_then(|indexes| indexes.get(&key).cloned())
+        {
+            return result.map_err(|error| anyhow!(error));
+        }
+        let result = (|| {
+            let database = self
+                .database
+                .lock()
+                .map_err(|_| anyhow!("DataviewJS database lock is poisoned"))?;
+            let descriptors: Vec<Value> = if key.starts_with('#') {
+                database
+                    .all_pages()?
+                    .into_iter()
+                    .filter(|page| page_has_tag(page, &key))
+                    .map(|page| page_descriptor(&page.path))
+                    .collect()
+            } else {
+                let folder = key.trim_matches('"');
+                database
+                    .all_page_refs()?
+                    .into_iter()
+                    .filter(|page| folder.is_empty() || page.path.starts_with(folder))
+                    .map(|page| page_descriptor(&page.path))
+                    .collect()
+            };
+            serde_json::to_string(&descriptors).map_err(Into::into)
+        })()
+        .map_err(|error: anyhow::Error| format!("{error:#}"));
+        if let Ok(mut indexes) = self.indexes.lock() {
+            indexes.insert(key, result.clone());
+        }
+        result.map_err(|error| anyhow!(error))
+    }
+
+    fn page_json(&self, path: String) -> Result<String> {
+        if let Some(result) = self
+            .pages
+            .lock()
+            .ok()
+            .and_then(|pages| pages.get(&path).cloned())
+        {
+            return result.map_err(|error| anyhow!(error));
+        }
+        let result = (|| {
+            let page = {
+                let database = self
+                    .database
+                    .lock()
+                    .map_err(|_| anyhow!("DataviewJS database lock is poisoned"))?;
+                database
+                    .page_record(&path)?
+                    .with_context(|| format!("DataviewJS page not found: {path}"))?
+            };
+            let mut value = page_value(&page, &LinkIndex::empty());
+            compact_dataviewjs_pages(std::slice::from_mut(&mut value));
+            resolve_links_in_value(&mut value, self.page_names()?);
+            serde_json::to_string(&value).map_err(Into::into)
+        })()
+        .map_err(|error: anyhow::Error| format!("{error:#}"));
+        if let Ok(mut pages) = self.pages.lock() {
+            pages.insert(path, result.clone());
+        }
+        result.map_err(|error| anyhow!(error))
+    }
+
+    fn links_json(&self, path: String) -> Result<String> {
+        if let Some(result) = self
+            .links
+            .lock()
+            .ok()
+            .and_then(|links| links.get(&path).cloned())
+        {
+            return result.map_err(|error| anyhow!(error));
+        }
+        let result = (|| {
+            let database = self
+                .database
+                .lock()
+                .map_err(|_| anyhow!("DataviewJS database lock is poisoned"))?;
+            let page = database
+                .page_record(&path)?
+                .with_context(|| format!("DataviewJS page not found: {path}"))?;
+            let links = LinkIndex::build_for_page(&database, &path)?;
+            let value = page_value(&page, &links);
+            let file = &value["file"];
+            serde_json::to_string(&json!({
+                "links": file["links"],
+                "outlinks": file["outlinks"],
+                "backlinks": file["backlinks"],
+                "inlinks": file["inlinks"],
+                "embeds": file["embeds"],
+            }))
+            .map_err(Into::into)
+        })()
+        .map_err(|error: anyhow::Error| format!("{error:#}"));
+        if let Ok(mut links) = self.links.lock() {
+            links.insert(path, result.clone());
+        }
+        result.map_err(|error| anyhow!(error))
+    }
+
+    fn tasks_json(&self, path: String) -> Result<String> {
+        if let Some(result) = self
+            .tasks
+            .lock()
+            .ok()
+            .and_then(|tasks| tasks.get(&path).cloned())
+        {
+            return result.map_err(|error| anyhow!(error));
+        }
+        let result = (|| {
+            let database = self
+                .database
+                .lock()
+                .map_err(|_| anyhow!("DataviewJS database lock is poisoned"))?;
+            let page = database
+                .page_record(&path)?
+                .with_context(|| format!("DataviewJS page not found: {path}"))?;
+            let tasks = collect_tasks_from_pages(std::slice::from_ref(&page))?;
+            serde_json::to_string(&tasks).map_err(Into::into)
+        })()
+        .map_err(|error: anyhow::Error| format!("{error:#}"));
+        if let Ok(mut tasks) = self.tasks.lock() {
+            tasks.insert(path, result.clone());
+        }
+        result.map_err(|error| anyhow!(error))
+    }
+}
+
+fn load_host_json(
+    control: &ScriptHostControl,
+    load: impl FnOnce() -> Result<String>,
+) -> rquickjs::Result<String> {
+    control.begin_host_phase();
+    match load() {
+        Ok(json) => Ok(json),
+        Err(error) => {
+            control.end_host_phase();
+            Err(JsError::new_from_js_message(
+                "mdq host",
+                "JavaScript",
+                format!("{error:#}"),
+            ))
+        }
+    }
+}
+
+fn page_descriptor(path: &str) -> Value {
+    let name = path
+        .trim_end_matches(".md")
+        .rsplit('/')
+        .next()
+        .unwrap_or(path);
+    json!({"path": path, "name": name})
+}
+
+fn page_has_tag(page: &crate::model::PageRecord, tag: &str) -> bool {
+    let tag = tag.trim_start_matches('#');
+    let frontmatter_match = match page.metadata.get("tags") {
+        Some(Value::Array(tags)) => tags.iter().any(|value| {
+            value
+                .as_str()
+                .is_some_and(|value| value.trim_start_matches('#') == tag)
+        }),
+        Some(Value::String(value)) => value.trim_start_matches('#') == tag,
+        _ => false,
+    };
+    frontmatter_match
+        || crate::markdown::extract_tags(&page.body)
+            .iter()
+            .any(|value| value == tag)
+}
+
+/// Removes aliases that duplicate every page's frontmatter before crossing the
+/// QuickJS memory boundary. The JavaScript bootstrap restores these aliases as
+/// shared objects before user code runs.
+fn compact_dataviewjs_pages(pages: &mut [Value]) {
+    for page in pages {
+        let Some(page) = page.as_object_mut() else {
+            continue;
+        };
+        page.remove("note");
+        if let Some(file) = page.get_mut("file").and_then(Value::as_object_mut) {
+            file.remove("properties");
+            file.remove("frontmatter");
+        }
     }
 }
 
@@ -547,21 +946,6 @@ fn attach_file_tasks(pages: &mut [Value], tasks: &[Value]) {
         let path = page["file"]["path"].as_str().unwrap_or_default();
         let page_tasks = by_path.remove(path).unwrap_or_default();
         page["file"]["tasks"] = Value::Array(page_tasks);
-    }
-}
-
-fn resolve_page_links(pages: &mut [Value]) {
-    let by_name: HashMap<String, String> = pages
-        .iter()
-        .filter_map(|page| {
-            page["file"]["name"]
-                .as_str()
-                .zip(page["file"]["path"].as_str())
-                .map(|(name, path)| (name.to_owned(), path.to_owned()))
-        })
-        .collect();
-    for page in pages {
-        resolve_links_in_value(page, &by_name);
     }
 }
 

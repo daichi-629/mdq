@@ -66,6 +66,10 @@ fn retry_on_lock<T>(mut action: impl FnMut() -> rusqlite::Result<T>) -> rusqlite
 }
 
 impl Database {
+    pub fn path(&self) -> Option<&Path> {
+        self.connection.path().map(Path::new)
+    }
+
     pub fn open(path: &Path) -> Result<Self> {
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent)?;
@@ -402,6 +406,65 @@ impl Database {
             })
         })?;
         rows.collect::<rusqlite::Result<Vec<_>>>()
+            .map_err(Into::into)
+    }
+
+    pub fn all_page_refs(&self) -> Result<Vec<NoteRef>> {
+        let mut statement = self
+            .connection
+            .prepare("SELECT path, title FROM notes ORDER BY path")?;
+        let rows = statement.query_map([], |row| {
+            Ok(NoteRef {
+                path: row.get(0)?,
+                title: row.get(1)?,
+            })
+        })?;
+        rows.collect::<rusqlite::Result<Vec<_>>>()
+            .map_err(Into::into)
+    }
+
+    pub fn total_page_bytes(&self) -> Result<usize> {
+        let bytes: i64 = self.connection.query_row(
+            "
+            SELECT COALESCE(SUM(
+                length(path) + length(title) + length(body) +
+                length(COALESCE(frontmatter_json, ''))
+            ), 0)
+            FROM notes
+            ",
+            [],
+            |row| row.get(0),
+        )?;
+        Ok(usize::try_from(bytes).unwrap_or(usize::MAX))
+    }
+
+    pub fn page_record(&self, path: &str) -> Result<Option<PageRecord>> {
+        self.connection
+            .query_row(
+                "
+                SELECT path, title, body, body_start_line, frontmatter_json, mtime, ctime, size
+                FROM notes
+                WHERE path = ?1
+                ",
+                [path],
+                |row| {
+                    let metadata = row
+                        .get::<_, Option<String>>(4)?
+                        .and_then(|json| serde_json::from_str(&json).ok())
+                        .unwrap_or_else(|| serde_json::Value::Object(Default::default()));
+                    Ok(PageRecord {
+                        path: row.get(0)?,
+                        title: row.get(1)?,
+                        body: row.get(2)?,
+                        body_start_line: row.get::<_, i64>(3)? as usize,
+                        metadata,
+                        mtime: row.get(5)?,
+                        ctime: row.get(6)?,
+                        size: row.get::<_, i64>(7)? as u64,
+                    })
+                },
+            )
+            .optional()
             .map_err(Into::into)
     }
 

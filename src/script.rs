@@ -1,11 +1,11 @@
 use std::sync::{
-    Arc,
+    Arc, Mutex,
     atomic::{AtomicBool, Ordering},
 };
 use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result};
-use rquickjs::{CatchResultExt, Context as JsContext, Runtime};
+use rquickjs::{CatchResultExt, Context as JsContext, Ctx, Runtime};
 use serde_json::Value;
 
 pub trait ScriptEngine: Send + Sync {
@@ -34,26 +34,100 @@ pub struct QuickJsEngine {
     limits: ScriptLimits,
 }
 
-impl ScriptEngine for QuickJsEngine {
-    fn evaluate(&self, source: &str, bindings: &Value) -> Result<Value> {
+#[derive(Clone)]
+pub(crate) struct ScriptHostControl {
+    deadline: Arc<Mutex<Instant>>,
+    paused_timeout: Arc<Mutex<Option<Duration>>>,
+}
+
+impl ScriptHostControl {
+    pub(crate) fn begin_host_phase(&self) {
+        let now = Instant::now();
+        let Ok(mut deadline) = self.deadline.lock() else {
+            return;
+        };
+        let remaining = deadline.saturating_duration_since(now);
+        if let Ok(mut paused) = self.paused_timeout.lock() {
+            *paused = Some(remaining);
+            *deadline = now + Duration::from_secs(24 * 60 * 60);
+        }
+    }
+
+    pub(crate) fn end_host_phase(&self) {
+        if let Ok(mut paused) = self.paused_timeout.lock()
+            && let Some(remaining) = paused.take()
+            && let Ok(mut deadline) = self.deadline.lock()
+        {
+            *deadline = Instant::now() + remaining;
+        }
+    }
+}
+
+impl QuickJsEngine {
+    pub(crate) fn evaluate_with_setup<F>(
+        &self,
+        source: &str,
+        bindings: &Value,
+        host_memory_bytes: usize,
+        setup: F,
+    ) -> Result<Value>
+    where
+        F: for<'js> FnOnce(&ScriptHostControl, Ctx<'js>) -> rquickjs::Result<()>,
+    {
         let runtime = Runtime::new()?;
-        runtime.set_memory_limit(self.limits.memory_bytes);
+        // QuickJS counts host-provided bindings against its heap limit. Give
+        // serialization a size-based provisional allowance, then replace it
+        // with the measured host-data baseline plus the script memory budget.
+        let serialized_bytes = serde_json::to_vec(bindings)?.len();
+        let provisional_limit = self
+            .limits
+            .memory_bytes
+            .saturating_add(host_memory_bytes)
+            .saturating_add(serialized_bytes.saturating_mul(8));
+        runtime.set_memory_limit(provisional_limit);
         runtime.set_max_stack_size(self.limits.max_stack_bytes);
-        let started = Instant::now();
         let interrupted = Arc::new(AtomicBool::new(false));
+        let deadline = Arc::new(Mutex::new(Instant::now() + self.limits.timeout));
+        let host_control = ScriptHostControl {
+            deadline: deadline.clone(),
+            paused_timeout: Arc::new(Mutex::new(None)),
+        };
+        let context = JsContext::full(&runtime)?;
+        context.with(|ctx| -> Result<()> {
+            let bindings = rquickjs_serde::to_value(ctx.clone(), bindings)?;
+            ctx.globals().set("__mdq", bindings)?;
+            setup(&host_control, ctx)?;
+            Ok(())
+        })?;
+        runtime.run_gc();
+        let host_memory = usize::try_from(runtime.memory_usage().malloc_size).unwrap_or(0);
+        runtime.set_memory_limit(
+            host_memory
+                .saturating_add(host_memory_bytes)
+                .saturating_add(self.limits.memory_bytes),
+        );
+        if let Ok(mut deadline) = deadline.lock() {
+            *deadline = Instant::now() + self.limits.timeout;
+        }
+
+        // Host data preparation can be substantial for a large vault. The
+        // timeout is intended to constrain user JavaScript, not serialization
+        // of the read-only bindings before that JavaScript starts.
         let interrupt_flag = interrupted.clone();
-        let timeout = self.limits.timeout;
+        let execution_active = Arc::new(AtomicBool::new(true));
+        let active_flag = execution_active.clone();
+        let interrupt_deadline = deadline;
         runtime.set_interrupt_handler(Some(Box::new(move || {
-            let expired = started.elapsed() > timeout;
+            let expired = active_flag.load(Ordering::Relaxed)
+                && interrupt_deadline
+                    .lock()
+                    .is_ok_and(|deadline| Instant::now() > *deadline);
             if expired {
                 interrupt_flag.store(true, Ordering::Relaxed);
             }
             expired
         })));
-        let context = JsContext::full(&runtime)?;
         let value = context.with(|ctx| -> Result<Value> {
-            let bindings = rquickjs_serde::to_value(ctx.clone(), bindings)?;
-            ctx.globals().set("__mdq", bindings)?;
             let wrapped = format!(
                 r#"
                 "use strict";
@@ -69,17 +143,25 @@ impl ScriptEngine for QuickJsEngine {
                 (() => {{ {source} }})()
                 "#
             );
-            let result: rquickjs::Value<'_> = ctx.eval(wrapped).catch(&ctx).map_err(|error| {
+            let result = ctx.eval(wrapped).catch(&ctx).map_err(|error| {
                 let msg = error.to_string();
                 let first_line = msg.lines().next().unwrap_or(&msg).to_owned();
                 anyhow::anyhow!("{first_line}")
-            })?;
+            });
+            execution_active.store(false, Ordering::Relaxed);
+            let result: rquickjs::Value<'_> = result?;
             rquickjs_serde::from_value(result).context("JavaScript result is not serializable")
-        })?;
+        });
         if interrupted.load(Ordering::Relaxed) {
             anyhow::bail!("JavaScript execution exceeded {:?}", self.limits.timeout);
         }
-        Ok(value)
+        value
+    }
+}
+
+impl ScriptEngine for QuickJsEngine {
+    fn evaluate(&self, source: &str, bindings: &Value) -> Result<Value> {
+        self.evaluate_with_setup(source, bindings, 0, |_, _| Ok(()))
     }
 }
 
@@ -94,6 +176,38 @@ mod tests {
             .evaluate("return __mdq.value * 2;", &json!({"value": 3}))
             .unwrap();
         assert_eq!(result, json!(6));
+    }
+
+    #[test]
+    fn binding_serialization_does_not_consume_the_execution_timeout() {
+        let engine = QuickJsEngine {
+            limits: ScriptLimits {
+                timeout: Duration::from_millis(10),
+                ..ScriptLimits::default()
+            },
+        };
+        let bindings = json!({"vault_data": "x".repeat(16 * 1024 * 1024)});
+
+        let result = engine.evaluate("return 3;", &bindings).unwrap();
+
+        assert_eq!(result, json!(3));
+    }
+
+    #[test]
+    fn host_bindings_do_not_consume_the_script_memory_budget() {
+        let engine = QuickJsEngine {
+            limits: ScriptLimits {
+                memory_bytes: 1024 * 1024,
+                ..ScriptLimits::default()
+            },
+        };
+        let bindings = json!({"vault_data": "x".repeat(2 * 1024 * 1024)});
+
+        let result = engine
+            .evaluate("return __mdq.vault_data.length;", &bindings)
+            .unwrap();
+
+        assert_eq!(result, json!(2 * 1024 * 1024));
     }
 
     #[test]
