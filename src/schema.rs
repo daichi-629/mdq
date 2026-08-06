@@ -6,7 +6,7 @@ use serde_json::Value;
 
 use crate::core::RecordSet;
 use crate::db::Status;
-use crate::model::{ContextItem, GraphOutput, IndexOutput, LinkRef, NoteRef, SearchHit};
+use crate::model::{CompactContextItem, GraphOutput, IndexOutput, LinkRef, NoteRef, SearchHit};
 
 #[derive(Serialize)]
 pub struct CommandJsonSchemas {
@@ -26,7 +26,7 @@ pub struct CommandJsonSchemas {
 pub fn command_json_schemas() -> CommandJsonSchemas {
     CommandJsonSchemas {
         index: schema_value::<IndexOutput>(),
-        search: schema_value::<Vec<ContextItem>>(),
+        search: schema_value::<Vec<CompactContextItem>>(),
         query_native: schema_value::<Vec<NoteRef>>(),
         query_record_set: schema_value::<RecordSet>(),
         backlinks: schema_value::<GraphOutput>(),
@@ -34,7 +34,7 @@ pub fn command_json_schemas() -> CommandJsonSchemas {
         unresolved_links: schema_value::<Vec<LinkRef>>(),
         graph: schema_value::<GraphOutput>(),
         pipeline_hits: schema_value::<Vec<SearchHit>>(),
-        pipeline_context: schema_value::<Vec<ContextItem>>(),
+        pipeline_context: schema_value::<Vec<CompactContextItem>>(),
         status: schema_value::<Status>(),
     }
 }

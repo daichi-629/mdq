@@ -96,6 +96,47 @@ pub struct ContextItem {
 }
 
 #[derive(Debug, Serialize, JsonSchema)]
+pub struct CompactContextItem<'a> {
+    pub path: &'a str,
+    pub heading: Option<&'a str>,
+    pub text: &'a str,
+}
+
+impl<'a> From<&'a ContextItem> for CompactContextItem<'a> {
+    fn from(item: &'a ContextItem) -> Self {
+        Self {
+            path: &item.path,
+            heading: item.heading.as_deref(),
+            text: &item.text,
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn compact_context_omits_ranking_details() {
+        let item = ContextItem {
+            path: "Notes/example.md".to_owned(),
+            heading: Some("Result".to_owned()),
+            score: 0.987654,
+            text: "Relevant content".to_owned(),
+            match_reasons: vec!["exact phrase".to_owned()],
+        };
+
+        let value = serde_json::to_value(CompactContextItem::from(&item)).unwrap();
+
+        assert_eq!(value["path"], "Notes/example.md");
+        assert_eq!(value["heading"], "Result");
+        assert_eq!(value["text"], "Relevant content");
+        assert!(value.get("score").is_none());
+        assert!(value.get("match_reasons").is_none());
+    }
+}
+
+#[derive(Debug, Serialize, JsonSchema)]
 pub struct IndexOutput {
     pub vault: String,
     pub database: String,

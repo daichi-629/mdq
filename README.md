@@ -96,9 +96,14 @@ refreshing silently.
 
 Default text output is minimized for piping into an LLM: one path (with
 `#heading` when present) per result, followed by its content, and no score or
-label noise. Pass `--verbose` to a `search` or `pipeline` command to include
-the score. `--json` always returns full structured data regardless of
-`--verbose`.
+label noise. This also applies to `--json`: search results contain only the
+path, heading, and content by default. Pass `--verbose` to a `search` or
+`pipeline` command to include the score and other ranking details.
+
+Tasks queries emit compact rows containing `path`, `line`, and the original
+Markdown task line as `task`. Pass `--verbose` to include the full Tasks
+compatibility record; this also controls whether `--json` uses compact or full
+rows.
 
 ## Native filter language
 

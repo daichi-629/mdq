@@ -8,7 +8,7 @@ use mdq::compat::CompatibilityEngine;
 use mdq::core::{QueryContext, RecordSet};
 use mdq::db::{Database, default_db_path};
 use mdq::manual;
-use mdq::model::{ContextItem, GraphOutput, IndexOutput, NoteRef, SearchHit};
+use mdq::model::{CompactContextItem, ContextItem, GraphOutput, IndexOutput, NoteRef, SearchHit};
 use mdq::pipeline::{PipelineEngine, StageSpec};
 use mdq::semantic;
 use regex::Regex;
@@ -119,6 +119,9 @@ enum Command {
         tasks_global_query: Option<String>,
         #[arg(short, long, default_value_t = 100)]
         limit: usize,
+        /// Tasks only: include the full compatibility record in the output.
+        #[arg(short, long)]
+        verbose: bool,
     },
     /// List links from a note.
     Links { note: String },
@@ -285,6 +288,7 @@ fn main() -> Result<()> {
             file,
             current,
             limit,
+            verbose,
             tasks_status,
             tasks_global_filter,
             tasks_global_query,
@@ -354,6 +358,9 @@ fn main() -> Result<()> {
                     if !cli.json {
                         eprintln!("note: {msg}");
                     }
+                }
+                if language == "tasks" && !verbose {
+                    result = compact_tasks_record_set(&result);
                 }
                 output_record_set(&result, cli.json)?;
             }
@@ -613,6 +620,28 @@ fn output_record_set(result: &RecordSet, json: bool) -> Result<()> {
         eprintln!("warning: {diagnostic}");
     }
     Ok(())
+}
+
+fn compact_tasks_record_set(result: &RecordSet) -> RecordSet {
+    let rows = result
+        .rows
+        .iter()
+        .map(|row| {
+            ["path", "line"]
+                .into_iter()
+                .filter_map(|key| row.get(key).cloned().map(|value| (key.to_owned(), value)))
+                .chain(
+                    row.get("originalMarkdown")
+                        .cloned()
+                        .map(|value| ("task".to_owned(), value)),
+                )
+                .collect()
+        })
+        .collect();
+    let mut compact = RecordSet::new("tasks", rows);
+    compact.columns = vec!["path".to_owned(), "line".to_owned(), "task".to_owned()];
+    compact.diagnostics = result.diagnostics.clone();
+    compact
 }
 
 fn parse_graph_depth(value: &str) -> Result<Option<usize>> {
@@ -898,7 +927,16 @@ fn resolve_current_file(vault: &Path, path: PathBuf) -> Result<PathBuf> {
 
 fn output_context(context: Vec<ContextItem>, json: bool, verbose: bool) -> Result<()> {
     if json {
-        return print_json(&context);
+        return if verbose {
+            print_json(&context)
+        } else {
+            print_json(
+                &context
+                    .iter()
+                    .map(CompactContextItem::from)
+                    .collect::<Vec<_>>(),
+            )
+        };
     }
     for (index, item) in context.iter().enumerate() {
         if index > 0 {
@@ -927,7 +965,50 @@ fn print_json<T: Serialize + ?Sized>(value: &T) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serde_json::json;
+    use std::collections::BTreeMap;
     use std::fs;
+
+    #[test]
+    fn compact_tasks_output_keeps_only_location_and_original_markdown() {
+        let row = BTreeMap::from([
+            ("path".to_owned(), json!("Projects/alpha.md")),
+            ("line".to_owned(), json!(10)),
+            (
+                "originalMarkdown".to_owned(),
+                json!("  - [ ] Ship alpha 📅 2026-06-20"),
+            ),
+            ("description".to_owned(), json!("Ship alpha")),
+            ("file".to_owned(), json!({"path": "Projects/alpha.md"})),
+        ]);
+        let mut full = RecordSet::new("tasks", vec![row]);
+        full.diagnostics.push("example warning".to_owned());
+
+        let compact = compact_tasks_record_set(&full);
+
+        assert_eq!(compact.kind, "tasks");
+        assert_eq!(compact.columns, ["path", "line", "task"]);
+        assert_eq!(compact.rows[0].len(), 3);
+        assert_eq!(compact.rows[0]["path"], "Projects/alpha.md");
+        assert_eq!(compact.rows[0]["line"], 10);
+        assert_eq!(compact.rows[0]["task"], "  - [ ] Ship alpha 📅 2026-06-20");
+        assert_eq!(compact.diagnostics, ["example warning"]);
+    }
+
+    #[test]
+    fn query_accepts_verbose_flag() {
+        let cli = Cli::try_parse_from([
+            "mdq",
+            "query",
+            "not done",
+            "--language",
+            "tasks",
+            "--verbose",
+        ])
+        .unwrap();
+
+        assert!(matches!(cli.command, Command::Query { verbose: true, .. }));
+    }
 
     #[test]
     fn current_file_must_resolve_inside_vault() {

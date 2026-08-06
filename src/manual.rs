@@ -300,7 +300,7 @@ Flags:
   --path REGEX     include only matching note paths; repeatable
   --max-chars N    total context character budget (default: unlimited); counts
                    path, heading label, and body text per result
-  --verbose        include score and heading detail in the output
+  --verbose        include score and ranking detail in the output
 
 {search_json_schema}
 
@@ -329,7 +329,7 @@ const QUERY: &str = r#"# query command
 
   mdq --vault PATH query [EXPRESSION] --language LANGUAGE
     [--file PATH] [--current PATH] [--tasks-status SPEC]
-    [--tasks-global-filter TEXT] [--tasks-global-query QUERY] [--limit N]
+    [--tasks-global-filter TEXT] [--tasks-global-query QUERY] [--limit N] [--verbose]
 
 Runs one of five query languages against the indexed vault:
   native (default)   see `mdq manual native`
@@ -348,6 +348,10 @@ For Tasks queries, repeat `--tasks-status` to define vault-independent status
 names and types: `SYMBOL=TYPE` or `SYMBOL=NAME:TYPE[:NEXT]`.
 Use `--tasks-global-filter` to require a marker string on task lines, and
 `--tasks-global-query` to prepend a default Tasks query.
+Tasks output is compact by default: each row contains only `path`, the
+one-based `line`, and the original Markdown task line as `task`. Pass
+`--verbose` to include the full Tasks compatibility record. This applies to
+both JSONL output and the `--json` RecordSet.
 
 `native` queries return matching notes. Every other language returns
 structured RecordSet rows (see `mdq manual extensions`).
@@ -495,7 +499,7 @@ Flags:
   --context        return full chunk context instead of search snippets
   --max-chars N    context character budget when `--context` is set
                    (default: unlimited)
-  --verbose        include score and heading detail in the output
+  --verbose        include score and ranking detail in the output
 
 Example:
   mdq pipeline \
