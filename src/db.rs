@@ -4,12 +4,13 @@ use std::thread;
 use std::time::Duration;
 
 use anyhow::{Context, Result};
+use rusqlite::functions::FunctionFlags;
 use rusqlite::{Connection, ErrorCode, OpenFlags, OptionalExtension, params};
 use sha2::{Digest, Sha256};
 use walkdir::{DirEntry, WalkDir};
 
 use crate::markdown::{normalize_target, parse_note};
-use crate::model::{EmbeddingInput, LinkRef, NoteRef, PageRecord, SearchHit};
+use crate::model::{EmbeddingInput, LinkRef, NoteRef, NoteResolution, PageRecord, SearchHit};
 use crate::query::MetadataFilter;
 use crate::tokenize::{fts_query, index_text};
 
@@ -17,7 +18,21 @@ pub struct Database {
     connection: Connection,
 }
 
+struct NoteIdResolution {
+    id: i64,
+    used_fallback: bool,
+}
+
 fn configure_connection(connection: &Connection) -> Result<()> {
+    connection.create_scalar_function(
+        "mdq_lower",
+        1,
+        FunctionFlags::SQLITE_UTF8 | FunctionFlags::SQLITE_DETERMINISTIC,
+        |context| {
+            let value: String = context.get(0)?;
+            Ok(value.to_lowercase())
+        },
+    )?;
     connection.busy_timeout(Duration::from_secs(120))?;
     connection.execute_batch(
         "
@@ -469,7 +484,7 @@ impl Database {
     }
 
     pub fn backlinks(&self, target: &str) -> Result<Vec<LinkRef>> {
-        let target_id = self.resolve_note_id(target)?;
+        let target_id = self.resolve_note_id(target)?.map(|resolved| resolved.id);
         let Some(target_id) = target_id else {
             return Ok(Vec::new());
         };
@@ -506,7 +521,7 @@ impl Database {
     }
 
     pub fn outgoing_links(&self, source: &str) -> Result<Vec<LinkRef>> {
-        let source_id = self.resolve_note_id(source)?;
+        let source_id = self.resolve_note_id(source)?.map(|resolved| resolved.id);
         let Some(source_id) = source_id else {
             return Ok(Vec::new());
         };
@@ -571,7 +586,7 @@ impl Database {
     }
 
     pub fn note_body(&self, path: &str) -> Result<Option<(NoteRef, String)>> {
-        let id = self.resolve_note_id(path)?;
+        let id = self.resolve_note_id(path)?.map(|resolved| resolved.id);
         let Some(id) = id else {
             return Ok(None);
         };
@@ -744,16 +759,43 @@ impl Database {
         self.metadata("vault")
     }
 
-    fn resolve_note_id(&self, input: &str) -> Result<Option<i64>> {
+    /// Resolves a note-like input and reports whether the unique title/filename
+    /// fallback was needed.
+    pub fn resolve_note(&self, input: &str) -> Result<Option<NoteResolution>> {
+        let Some(resolved) = self.resolve_note_id(input)? else {
+            return Ok(None);
+        };
+        self.connection
+            .query_row(
+                "SELECT path, title FROM notes WHERE id = ?1",
+                [resolved.id],
+                |row| {
+                    Ok(NoteResolution {
+                        note: NoteRef {
+                            path: row.get(0)?,
+                            title: row.get(1)?,
+                        },
+                        used_fallback: resolved.used_fallback,
+                    })
+                },
+            )
+            .optional()
+            .map_err(Into::into)
+    }
+
+    fn resolve_note_id(&self, input: &str) -> Result<Option<NoteIdResolution>> {
         let normalized = normalize_target(input);
         let filename = normalized.rsplit('/').next().unwrap_or(&normalized);
         // Try exact path match first — this is always unambiguous even when another note
         // shares the same filename or title.
+        // SQLite's built-in lower() only handles ASCII. mdq_lower uses the same Unicode
+        // lowercase mapping as normalize_target() and the index link resolver (e.g.
+        // `Ｂ` and `ｂ`) while retaining the indexed query shape.
         let mut path_stmt = self.connection.prepare(
             "
             SELECT id FROM notes
-            WHERE lower(path) = ?1 || '.md'
-               OR lower(substr(path, 1, length(path) - 3)) = ?1
+            WHERE mdq_lower(path) = ?1 || '.md'
+               OR mdq_lower(substr(path, 1, length(path) - 3)) = ?1
             LIMIT 2
             ",
         )?;
@@ -761,30 +803,38 @@ impl Database {
             .query_map([&normalized], |row| row.get(0))?
             .collect::<rusqlite::Result<Vec<i64>>>()?;
         if path_ids.len() == 1 {
-            return Ok(Some(path_ids[0]));
+            return Ok(Some(NoteIdResolution {
+                id: path_ids[0],
+                used_fallback: false,
+            }));
         }
         // Fall back to title / filename match (may be ambiguous).
         let mut title_stmt = self
             .connection
-            .prepare("SELECT id FROM notes WHERE lower(title) = ?1 LIMIT 2")?;
+            .prepare("SELECT id FROM notes WHERE mdq_lower(title) = ?1 LIMIT 2")?;
         let title_ids = title_stmt
             .query_map([filename], |row| row.get(0))?
             .collect::<rusqlite::Result<Vec<i64>>>()?;
-        Ok((title_ids.len() == 1).then(|| title_ids[0]))
+        Ok((title_ids.len() == 1).then(|| NoteIdResolution {
+            id: title_ids[0],
+            used_fallback: true,
+        }))
     }
 
     /// Candidate paths for a note-like input. Exact resolution remains strict; this is
-    /// only diagnostic data for callers after resolution failed or was ambiguous.
-    pub fn note_candidates(&self, input: &str) -> Result<Vec<String>> {
+    /// only diagnostic data for callers after resolution failed or was ambiguous. The
+    /// caller controls how many candidates are needed for its diagnostic output.
+    pub fn note_candidates(&self, input: &str, limit: usize) -> Result<Vec<String>> {
         let normalized = normalize_target(input);
         let needle = normalized.rsplit('/').next().unwrap_or(&normalized);
+        let limit = i64::try_from(limit).context("candidate limit exceeds SQLite range")?;
         let mut statement = self.connection.prepare(
             "SELECT path FROM notes
-             WHERE lower(title) LIKE '%' || ?1 || '%'
-                OR lower(path) LIKE '%' || ?1 || '%'
-             ORDER BY path LIMIT 20",
+             WHERE mdq_lower(title) LIKE '%' || ?1 || '%'
+                OR mdq_lower(path) LIKE '%' || ?1 || '%'
+             ORDER BY path LIMIT ?2",
         )?;
-        let rows = statement.query_map([needle], |row| row.get(0))?;
+        let rows = statement.query_map(params![needle, limit], |row| row.get(0))?;
         rows.collect::<rusqlite::Result<Vec<_>>>()
             .map_err(Into::into)
     }
@@ -1274,6 +1324,48 @@ mod tests {
         assert_eq!(links.len(), 1);
         let backlinks = database.backlinks("b/Alpha").unwrap();
         assert_eq!(backlinks.len(), 1);
+
+        let resolution = database.resolve_note("a/Alpha").unwrap().unwrap();
+        assert_eq!(resolution.note.path, "a/Alpha.md");
+        assert!(!resolution.used_fallback);
+    }
+
+    #[test]
+    fn resolves_note_paths_with_unicode_case_mapping() {
+        let directory = tempfile::tempdir().unwrap();
+        let vault = directory.path().join("notes");
+        fs::create_dir_all(&vault).unwrap();
+        fs::write(vault.join("Ｂ.md"), "# Fullwidth B\n[[target]]\n").unwrap();
+        fs::write(vault.join("target.md"), "# Target\n").unwrap();
+
+        let mut database = Database::open(&directory.path().join("index.sqlite3")).unwrap();
+        database.rebuild(&vault).unwrap();
+
+        let links = database.outgoing_links("Ｂ").unwrap();
+        assert_eq!(links.len(), 1);
+        assert_eq!(links[0].source.path, "Ｂ.md");
+
+        let resolution = database.resolve_note("ｂ").unwrap().unwrap();
+        assert_eq!(resolution.note.path, "Ｂ.md");
+        assert!(!resolution.used_fallback);
+    }
+
+    #[test]
+    fn reports_when_note_resolution_uses_unique_filename_fallback() {
+        let directory = tempfile::tempdir().unwrap();
+        let vault = directory.path().join("notes");
+        fs::create_dir_all(vault.join("actual")).unwrap();
+        fs::write(vault.join("actual/Alpha.md"), "# Alpha\n").unwrap();
+
+        let mut database = Database::open(&directory.path().join("index.sqlite3")).unwrap();
+        database.rebuild(&vault).unwrap();
+
+        let resolution = database
+            .resolve_note("missing-directory/Alpha")
+            .unwrap()
+            .unwrap();
+        assert_eq!(resolution.note.path, "actual/Alpha.md");
+        assert!(resolution.used_fallback);
     }
 
     #[test]

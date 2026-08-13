@@ -49,6 +49,12 @@ pub struct NoteRef {
     pub title: String,
 }
 
+#[derive(Clone, Debug)]
+pub struct NoteResolution {
+    pub note: NoteRef,
+    pub used_fallback: bool,
+}
+
 #[derive(Debug, Serialize, JsonSchema)]
 pub struct GraphOutput {
     pub direction: String,

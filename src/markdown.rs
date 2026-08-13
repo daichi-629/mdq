@@ -243,7 +243,10 @@ pub fn extract_tags(body: &str) -> Vec<String> {
 
 pub fn normalize_target(target: &str) -> String {
     let mut path = PathBuf::from(target.trim());
-    if path.extension().is_some_and(|extension| extension == "md") {
+    if path
+        .extension()
+        .is_some_and(|extension| extension.to_string_lossy().eq_ignore_ascii_case("md"))
+    {
         path.set_extension("");
     }
     path.to_string_lossy()

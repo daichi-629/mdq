@@ -144,7 +144,9 @@ ambiguous links remain unresolved. Non-Markdown files are not indexed as
 notes, but existing vault files such as Base documents and attachments are not
 counted as unresolved links in `status`.
 Use `mdq --vault ~/notes unresolved-links` to print the actual unresolved link
-records.
+records. For note arguments, an exact path is preferred; if it is not found,
+the unique basename/title fallback is retained and a diagnostic on stderr shows
+the indexed path it selected.
 
 ## Index location
 

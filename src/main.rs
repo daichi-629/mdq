@@ -8,7 +8,9 @@ use mdq::compat::CompatibilityEngine;
 use mdq::core::{QueryContext, RecordSet};
 use mdq::db::{Database, default_db_path};
 use mdq::manual;
-use mdq::model::{CompactContextItem, ContextItem, GraphOutput, IndexOutput, NoteRef, SearchHit};
+use mdq::model::{
+    CompactContextItem, ContextItem, GraphOutput, IndexOutput, NoteRef, NoteResolution, SearchHit,
+};
 use mdq::pipeline::{PipelineEngine, StageSpec};
 use mdq::semantic;
 use regex::Regex;
@@ -366,10 +368,11 @@ fn main() -> Result<()> {
             }
         }
         Command::Links { note } => {
-            if database.note_body(&note)?.is_none() {
+            let Some(resolution) = database.resolve_note(&note)? else {
                 bail!("note not found or ambiguous: {note}");
-            }
-            let links = database.outgoing_links(&note)?;
+            };
+            report_note_fallback(&note, &resolution);
+            let links = database.outgoing_links(&resolution.note.path)?;
             if cli.json {
                 print_json(&links)?;
             } else {
@@ -659,10 +662,11 @@ fn traverse_graph(
     direction: GraphDirection,
     depth: Option<usize>,
 ) -> Result<GraphOutput> {
+    const NOTE_CANDIDATE_LIMIT: usize = 20;
     let mut starts = Vec::new();
     for input in inputs {
-        let Some((note, _)) = database.note_body(input)? else {
-            let candidates = database.note_candidates(input)?;
+        let Some(resolution) = database.resolve_note(input)? else {
+            let candidates = database.note_candidates(input, NOTE_CANDIDATE_LIMIT)?;
             let hint = if candidates.is_empty() {
                 "no basename, suffix, or stem candidates found".to_owned()
             } else {
@@ -670,7 +674,8 @@ fn traverse_graph(
             };
             bail!("note not found or ambiguous: {input}; {hint}; retry with an exact path");
         };
-        starts.push(note);
+        report_note_fallback(input, &resolution);
+        starts.push(resolution.note);
     }
     starts.sort_by(|a, b| a.path.cmp(&b.path));
     starts.dedup_by(|a, b| a.path == b.path);
@@ -713,6 +718,15 @@ fn traverse_graph(
         starts,
         notes: result,
     })
+}
+
+fn report_note_fallback(input: &str, resolution: &NoteResolution) {
+    if resolution.used_fallback {
+        eprintln!(
+            "note: resolved {input:?} via basename/title fallback to {}",
+            resolution.note.path
+        );
+    }
 }
 
 fn build_context(

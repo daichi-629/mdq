@@ -397,6 +397,8 @@ start note and notes which link to it. Multiple starts are accepted.
 
 NOTE may be a path (`People/Alice.md`) or a note-like target (`Alice`) that
 mdq can resolve through the indexed link resolver.
+If an exact path is not found, mdq retains the unique basename/title fallback
+and reports the selected indexed path on stderr.
 
 {graph_json_schema}
 
@@ -422,6 +424,8 @@ Lists outgoing links from NOTE. Text output is one
 `raw_target<TAB>resolved_path<TAB>embed` row per line; an unresolved target
 prints `<unresolved>` in place of the resolved path. `--json` returns the
 full structured link records.
+If NOTE requires the unique basename/title fallback, mdq reports the selected
+indexed path on stderr while keeping the link output unchanged.
 
 {link_ref_json_schema}
 
@@ -467,6 +471,8 @@ const GRAPH: &str = r#"# graph command
 Traverses resolved links from one or more starts. Direction defaults to `both`
 and depth defaults to 2. Output is deterministic and includes every start.
 JSON includes `direction`, nullable `depth`, `starts`, and `notes`.
+Note arguments that require the unique basename/title fallback report their
+selected indexed paths on stderr.
 
 When to use:
   Use `graph` when link neighborhood matters more than a single incoming or

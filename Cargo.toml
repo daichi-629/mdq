@@ -21,7 +21,7 @@ pulldown-cmark = "0.13"
 regex = "1.11"
 rquickjs = "0.12"
 rquickjs-serde = "0.6"
-rusqlite = { version = "0.40", features = ["bundled"] }
+rusqlite = { version = "0.40", features = ["bundled", "functions"] }
 schemars = { version = "1.2.1", features = ["derive"] }
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
